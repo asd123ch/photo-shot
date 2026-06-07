@@ -1,0 +1,61 @@
+@import "tailwindcss";
+@config "./tailwind.config.js";
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  /* Render native controls (select popups, option/optgroup, scrollbars) in dark
+     theme so dropdown headings stay legible instead of light-on-light. */
+  html {
+    color-scheme: dark;
+  }
+
+  /* App-like feel on mobile: prevent rubber-band scrolling of the page itself */
+  body {
+    overscroll-behavior: none;
+  }
+
+  /* App-like input: no double-tap-to-zoom and no legacy 300ms tap delay (pinch
+     zoom is disabled via the viewport meta). Panning/scrolling still works. */
+  body,
+  #root {
+    touch-action: manipulation;
+  }
+
+  /* Visible, on-brand keyboard focus for every interactive control.
+     :where() keeps specificity at 0 so component styles can still override. */
+  :where(a, button, select, textarea, input, [role="button"], [tabindex]):focus-visible {
+    outline: 2px solid theme('colors.primary');
+    outline-offset: 2px;
+    border-radius: 6px;
+  }
+
+  /* Respect users who reduce motion. */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    ::before,
+    ::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}
+
+@layer utilities {
+  /* Hide scrollbar for Chrome, Safari and Opera */
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+
+  /* Hide scrollbar for IE, Edge and Firefox */
+  .no-scrollbar {
+    -ms-overflow-style: none; /* IE and Edge */
+    scrollbar-width: none; /* Firefox */
+  }
+}

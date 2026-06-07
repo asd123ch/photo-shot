@@ -1,0 +1,54 @@
+services:
+  app:
+    image: local/photo-shot:latest
+    container_name: photo-shot
+    restart: unless-stopped
+    build:
+      context: ./app
+    env_file:
+      - .env
+    volumes:
+      # Shared history (metadata index + generated images), kept outside the
+      # container so it survives redeploys and is identical on every device.
+      - ./data/history:/var/lib/photoshot/api/history
+    healthcheck:
+      test: ["CMD", "wget", "-qO", "/dev/null", "http://localhost/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks:
+      - proxy
+      - internal
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=proxy"
+      - "traefik.http.routers.photo-shot.entrypoints=http"
+      - "traefik.http.routers.photo-shot.rule=Host(`photo-shot.example.com`)"
+      - "traefik.http.middlewares.photo-shot-https-redirect.redirectscheme.scheme=https"
+      - "traefik.http.routers.photo-shot.middlewares=photo-shot-https-redirect"
+      - "traefik.http.routers.photo-shot-secure.entrypoints=https"
+      - "traefik.http.routers.photo-shot-secure.rule=Host(`photo-shot.example.com`)"
+      - "traefik.http.routers.photo-shot-secure.tls=true"
+      - "traefik.http.routers.photo-shot-secure.service=photo-shot"
+      - "traefik.http.services.photo-shot.loadbalancer.server.port=80"
+
+  # Cloudflare Tunnel (optional): exposes the app to the internet without opening
+  # any inbound ports. cloudflared dials out to Cloudflare and forwards requests
+  # to http://photo-shot:80 over the internal network. Leave CLOUDFLARE_TUNNEL_TOKEN
+  # empty in .env to disable it.
+  cloudflared:
+    image: cloudflare/cloudflared:2026.5.0
+    container_name: photo-shot-cloudflared
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
+    depends_on:
+      app:
+        condition: service_started
+    networks:
+      - internal
+
+networks:
+  proxy:
+    external: true
+  internal:
+    driver: bridge

@@ -1,0 +1,3 @@
+# Private self-hosted app — keep it out of search engines and crawlers.
+User-agent: *
+Disallow: /

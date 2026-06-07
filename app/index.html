@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+    <title>Photo-Shot</title>
+    <meta name="description" content="Mobile-first AI image post-processing and editing tool." />
+    <meta name="robots" content="noindex, nofollow" />
+
+    <!-- PWA / mobile standalone -->
+    <meta name="theme-color" content="#0a0b0d" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Photo-Shot" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png?v=cham4" />
+    <link rel="icon" href="/favicon.ico?v=cham4" sizes="any" />
+    <link rel="icon" type="image/png" href="/icons/favicon-32.png?v=cham4" sizes="32x32" />
+    <link rel="icon" type="image/png" href="/icons/favicon-16.png?v=cham4" sizes="16x16" />
+
+    <!-- Runtime configuration (API keys). Generated at container start from env vars.
+         In local dev this is an empty placeholder and values come from .env (VITE_*). -->
+    <script src="/config.js"></script>
+  </head>
+  <body class="bg-background text-white antialiased overflow-hidden fixed inset-0">
+    <div id="root" class="h-full w-full overflow-y-auto no-scrollbar"></div>
+    <script type="module" src="/index.tsx"></script>
+  </body>
+</html>
