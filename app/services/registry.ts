@@ -228,7 +228,7 @@ export const MODELS: ModelDef[] = [
   {
     key: 'openrouter:gemini-3-pro',
     provider: 'openrouter',
-    apiModel: 'google/gemini-3-pro-image-preview',
+    apiModel: 'google/gemini-3-pro-image',
     label: 'Nano Banana Pro',
     tag: 'OpenRouter',
     input: 'both',
@@ -242,7 +242,7 @@ export const MODELS: ModelDef[] = [
   {
     key: 'openrouter:gemini-3.1-flash',
     provider: 'openrouter',
-    apiModel: 'google/gemini-3.1-flash-image-preview',
+    apiModel: 'google/gemini-3.1-flash-image',
     label: 'Nano Banana 2',
     tag: 'OpenRouter',
     input: 'both',
