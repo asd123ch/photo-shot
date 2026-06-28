@@ -139,6 +139,26 @@ export const providerKeyPresent = async (provider: Provider): Promise<boolean> =
 // Shared WaveSpeed polling
 // ---------------------------------------------------------------------------
 
+// WaveSpeed returns an absolute poll URL in its response (`rd.urls.get`). That
+// value is provider-controlled, so validate it strictly before routing it back
+// through our proxy: only an https://api.wavespeed.ai URL under /api/v3/ is
+// accepted, and we rebuild a same-origin /api/wavespeed/ path from the
+// validated pathname. This stops a malicious or compromised response from
+// pointing the authenticated poll fetch (which carries X-App-Password) at an
+// attacker-controlled host, which would leak the unlock password.
+const proxiedWavespeedPollUrl = (pollUrl: string): string => {
+  let u: URL;
+  try {
+    u = new URL(pollUrl, WAVESPEED_UPSTREAM);
+  } catch {
+    throw new Error("WaveSpeed returned an invalid poll URL.");
+  }
+  if (u.origin !== 'https://api.wavespeed.ai' || !u.pathname.startsWith('/api/v3/')) {
+    throw new Error("WaveSpeed poll URL failed validation (unexpected host or path).");
+  }
+  return `${WAVESPEED_BASE}${u.pathname.slice('/api/v3'.length)}${u.search}`;
+};
+
 const wavespeedRequest = async (endpoint: string, body: object, signal?: AbortSignal): Promise<string> => {
   const headers = authHeaders({ 'Content-Type': 'application/json' });
   const response = await fetch(endpoint, { method: 'POST', headers, body: JSON.stringify(body), signal });
@@ -156,16 +176,17 @@ const wavespeedRequest = async (endpoint: string, body: object, signal?: AbortSi
 
   const pollUrl = rd.urls?.get;
   if (!pollUrl) throw new Error("WaveSpeed returned no result URL.");
-  // WaveSpeed returns an absolute api.wavespeed.ai URL; route it back through
-  // our proxy so the server can attach the key.
-  const proxiedPoll = pollUrl.replace(WAVESPEED_UPSTREAM, WAVESPEED_BASE);
+  // Validate + rebuild the poll URL onto our same-origin proxy (see helper).
+  const proxiedPoll = proxiedWavespeedPollUrl(pollUrl);
 
   const MAX_ATTEMPTS = 150; // ~5 minutes
   for (let i = 0; i < MAX_ATTEMPTS; i++) {
     throwIfAborted(signal);
     await new Promise(r => setTimeout(r, 2000));
     throwIfAborted(signal);
-    const pollRes = await fetch(proxiedPoll, { headers, signal });
+    // redirect: 'error' so a proxied redirect can't bounce the password header
+    // off-origin; the poll endpoint only ever returns JSON status.
+    const pollRes = await fetch(proxiedPoll, { headers, signal, redirect: 'error' });
     if (!pollRes.ok) continue;
     const raw = await pollRes.json();
     const pd = raw.data ? raw.data : raw;
@@ -199,8 +220,11 @@ interface RunOpts {
 export interface GenerateResult {
   imageUrl: string;
   finalRatio: string;
-  cost: number | null;
+  cost: number | null;       // best-known USD: actual billed amount if the
+                             // provider reports it, otherwise the price estimate
+  costEstimate: boolean;     // true = cost is an estimate (show "~")
   modelLabel: string;
+  provider: Provider;        // for cost aggregation / the spend ledger
 }
 
 const isRetryableGeminiError = (err: any): boolean => {
@@ -293,7 +317,7 @@ const generateWavespeed = async (def: ModelDef, o: RunOpts, ratio: string): Prom
   return wavespeedRequest(`${WAVESPEED_BASE}/${def.apiModel}`, body, o.signal);
 };
 
-const generateOpenrouter = async (def: ModelDef, o: RunOpts, ratio: string): Promise<string> => {
+const generateOpenrouter = async (def: ModelDef, o: RunOpts, ratio: string): Promise<{ url: string; cost: number | null }> => {
   if (!PROVIDER_AVAILABLE.openrouter) throw new Error("No OpenRouter API key configured on the server.");
   const content: any[] = [{ type: 'text', text: o.prompt || "Professional high-quality edit and enhancement." }];
   for (const img of o.images) {
@@ -301,7 +325,12 @@ const generateOpenrouter = async (def: ModelDef, o: RunOpts, ratio: string): Pro
   }
   const body: any = {
     model: def.apiModel,
-    modalities: ['image', 'text'],
+    // Image-only models (e.g. GPT Image 2) reject ['image','text'] with "no
+    // endpoints support the requested output modalities" since they emit no text.
+    modalities: def.outputModalities ?? ['image', 'text'],
+    // Ask OpenRouter to return the actual billed amount in usage.cost so we can
+    // track real spend instead of an estimate (esp. for token-billed models).
+    usage: { include: true },
     messages: [{ role: 'user', content }],
   };
   // OpenRouter image_config: aspect_ratio + image_size ("2K"/"4K"). image_size is
@@ -329,7 +358,8 @@ const generateOpenrouter = async (def: ModelDef, o: RunOpts, ratio: string): Pro
   const data = await response.json();
   const msg = data.choices?.[0]?.message;
   const url = msg?.images?.[0]?.image_url?.url;
-  if (url) return url;
+  const cost = typeof data.usage?.cost === 'number' ? data.usage.cost : null;
+  if (url) return { url, cost };
   throw new Error("OpenRouter returned no image. The model may not support image output or rejected the request.");
 };
 
@@ -364,9 +394,14 @@ export const runGenerate = async (o: RunOpts): Promise<GenerateResult> => {
   const oo: RunOpts = { ...o, images };
 
   let imageUrl: string;
+  let actualCost: number | null = null; // real billed amount, if the provider reports it
   if (def.provider === 'gemini') imageUrl = await generateGemini(def, oo, ratio);
   else if (def.provider === 'wavespeed') imageUrl = await generateWavespeed(def, oo, ratio);
-  else imageUrl = await generateOpenrouter(def, oo, ratio);
+  else {
+    const r = await generateOpenrouter(def, oo, ratio);
+    imageUrl = r.url;
+    actualCost = r.cost;
+  }
 
   const costSel: CostInput = {
     resolution: o.resolution,
@@ -375,10 +410,18 @@ export const runGenerate = async (o: RunOpts): Promise<GenerateResult> => {
     imageSearch: o.imageSearch,
     flex: o.flex,
   };
+  // Prefer the provider's real billed amount; fall back to the price estimate.
+  // For flat / per-resolution models the estimate already equals the real price,
+  // so only token-billed OpenRouter models actually rely on the actual cost.
+  const estimate = computeCost(def, costSel);
+  const cost = actualCost != null ? actualCost : estimate.usd;
+  const costEstimate = actualCost != null ? false : estimate.from || estimate.tokenBilled;
   return {
     imageUrl,
     finalRatio: ratio || 'auto',
-    cost: computeCost(def, costSel).usd,
+    cost,
+    costEstimate,
     modelLabel: def.label,
+    provider: def.provider,
   };
 };

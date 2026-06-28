@@ -39,6 +39,7 @@ export interface ModelDef {
   pixelBudget?: number; // output sized by a total-pixel budget spread over the ratio (e.g. Grok 2K)
   baseLongEdge?: number;// resolution-less model with a fixed long edge
   singleImageParam?: boolean; // WaveSpeed edit models that take a single `image` param instead of `images`
+  outputModalities?: string[]; // OpenRouter modalities; default ['image','text'], image-only models use ['image']
   resolutions: string[];// display tokens, e.g. ['1K','2K','4K']; [] = N/A
   defaultResolution?: string;
   outputFormats?: string[];
@@ -254,9 +255,9 @@ export const MODELS: ModelDef[] = [
     flex: true,
   },
   {
-    key: 'openrouter:gpt-5.4-image-2',
+    key: 'openrouter:gpt-image-2',
     provider: 'openrouter',
-    apiModel: 'openai/gpt-5.4-image-2',
+    apiModel: 'openai/gpt-image-2',
     label: 'GPT Image 2',
     tag: 'OpenRouter',
     input: 'both',
@@ -264,8 +265,8 @@ export const MODELS: ModelDef[] = [
     ratios: STD,
     resolutions: ['2K', '4K'], // OpenRouter image_config.image_size
     defaultResolution: '2K',
-    pricing: { kind: 'token', inPerM: 8, outPerM: 15, estPerImage: 0.12 },
-    flex: true,
+    outputModalities: ['image'], // dedicated image model: outputs image only, not text
+    pricing: { kind: 'token', inPerM: 8, outPerM: 8, estPerImage: 0.1 },
   },
   {
     key: 'openrouter:seedream-4.5',
@@ -289,6 +290,23 @@ export const MODELS: ModelDef[] = [
 const MODEL_BY_KEY: Record<string, ModelDef> = Object.fromEntries(MODELS.map((m) => [m.key, m]));
 
 export const getModel = (key: string): ModelDef | undefined => MODEL_BY_KEY[key];
+
+// History items store the model *label* (e.g. "Nano Banana Pro"); this maps it
+// back to its def so older entries (without a stored provider) can still be
+// grouped by provider in the cost overview. Labels are NOT unique across
+// providers ("Nano Banana 2", "GPT Image 2" etc. exist for several providers),
+// so only unambiguous labels are mapped — an ambiguous label resolves to
+// undefined (→ "unknown" provider) rather than being silently mis-attributed to
+// whichever provider happened to be defined last.
+const LABEL_COUNTS = MODELS.reduce<Record<string, number>>((acc, m) => {
+  acc[m.label] = (acc[m.label] ?? 0) + 1;
+  return acc;
+}, {});
+const MODEL_BY_LABEL: Record<string, ModelDef> = Object.fromEntries(
+  MODELS.filter((m) => LABEL_COUNTS[m.label] === 1).map((m) => [m.label, m]),
+);
+
+export const findModelByLabel = (label: string): ModelDef | undefined => MODEL_BY_LABEL[label];
 
 export const PROVIDERS: Provider[] = ['gemini', 'wavespeed', 'openrouter'];
 

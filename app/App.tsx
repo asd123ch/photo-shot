@@ -4,13 +4,18 @@ import ImageUploader from './components/ImageUploader';
 import ResultCard from './components/ResultCard';
 import { runGenerate, providerKeyPresent } from './services/generate';
 import {
-  PROVIDERS, getModel, modelsByProvider, getProviderLabel, formatCost, formatUsd, computeCost, closestRatio,
+  PROVIDERS, getModel, modelsByProvider, getProviderLabel, formatCost, formatUsd, closestRatio,
   DEFAULT_MODEL_KEY, Provider, finalResolution,
 } from './services/registry';
 import { Sparkles, AlertCircle, Zap, Lock, Wand2, History as HistoryIcon, Trash2, RotateCcw, ArrowLeft, MapPin, Edit2, FileDigit, ArrowDown, Info, Copy, FileType, LocateFixed, RefreshCw, Clock, HelpCircle } from 'lucide-react';
 import TemplateMenu from './components/TemplateMenu';
 import GuideView from './components/GuideView';
-import { loadHistory, saveHistory, clearHistory as clearHistoryStore, persistImage, deleteImage } from './services/history';
+import SpendSummary from './components/SpendSummary';
+import {
+  loadHistory, saveHistory, clearHistory as clearHistoryStore, persistImage, deleteImage,
+  loadLedger, recordSpend, backfillLedger, SpendLedger,
+} from './services/history';
+import { providerOf } from './services/spend';
 // @ts-ignore
 import piexif from 'piexifjs';
 import { setAppPassword, getAppPassword } from './config';
@@ -150,6 +155,7 @@ const App: React.FC = () => {
   // Common State
   const [keepMetadata, setKeepMetadata] = useState(true);
   const [results, setResults] = useState<GeneratedImage[]>([]);
+  const [ledger, setLedger] = useState<SpendLedger | null>(null);
   const [latestResult, setLatestResult] = useState<GeneratedImage | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -191,7 +197,7 @@ const App: React.FC = () => {
   useEffect(() => {
     if (!isAuthenticated) return;
     let cancelled = false;
-    loadHistory().then((items) => {
+    loadHistory().then(async (items) => {
       if (cancelled) return;
       const cutoff = Date.now() - HISTORY_MAX_AGE_MS;
       const fresh = items.filter((it) => (it.timestamp ?? 0) >= cutoff);
@@ -199,6 +205,17 @@ const App: React.FC = () => {
       if (fresh.length !== items.length) {
         items.filter((it) => (it.timestamp ?? 0) < cutoff).forEach((it) => void deleteImage(it.url));
         void saveHistory(fresh);
+      }
+      // Load the persistent spend ledger; if there isn't one yet, seed it once
+      // from whatever history we have so existing users get a lifetime total.
+      const existing = await loadLedger();
+      if (cancelled) return;
+      if (existing) {
+        setLedger(existing);
+      } else if (fresh.length > 0) {
+        setLedger(await backfillLedger(fresh, providerOf));
+      } else {
+        setLedger(null);
       }
     });
     return () => { cancelled = true; };
@@ -529,18 +546,19 @@ const App: React.FC = () => {
           exifToSave = files[0].exifData;
       }
 
-      const costInfo = computeCost(def, { resolution, quality, webSearch, imageSearch, flex });
+      const stamp = Date.now();
       const newResult: GeneratedImage = {
         id: crypto.randomUUID(),
         url: response.imageUrl,
         prompt: prompt || "Auto-enhanced image",
-        timestamp: Date.now(),
+        timestamp: stamp,
         aspectRatio: response.finalRatio,
         resolution: def.resolutions.length ? resolution : '',
         exifData: exifToSave,
         cost: response.cost ?? undefined,
-        costEstimate: costInfo.from || costInfo.tokenBilled,
+        costEstimate: response.costEstimate,
         model: response.modelLabel,
+        provider: response.provider,
       };
 
       setLatestResult(newResult);
@@ -551,6 +569,14 @@ const App: React.FC = () => {
         void saveHistory(updated);
         return updated;
       });
+
+      // Add to the persistent lifetime spend ledger (never decremented).
+      // Generations are serialized by the loading guard, so `ledger` is current.
+      if (typeof response.cost === 'number' && response.cost > 0) {
+        recordSpend(ledger, { cost: response.cost, provider: response.provider, timestamp: stamp })
+          .then(setLedger)
+          .catch(() => {});
+      }
 
       if (navigator.vibrate) navigator.vibrate(50);
 
@@ -1116,6 +1142,8 @@ const App: React.FC = () => {
                     </div>
                 ) : (
                     <div className="space-y-8">
+                        <SpendSummary results={results} ledger={ledger} />
+
                         {results.map(res => (
                             <ResultCard key={res.id} result={res} onDelete={() => deleteHistoryItem(res)} />
                         ))}

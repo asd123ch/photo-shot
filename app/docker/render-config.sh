@@ -22,8 +22,22 @@ chown -R nginx:nginx /var/lib/photoshot 2>/dev/null || true
 GEMINI_KEY="${GEMINI_API_KEY:-}"
 WAVESPEED_KEY="${WAVESPEED_API_KEY:-}"
 OPENROUTER_KEY="${OPENROUTER_API_KEY:-}"
-APP_PW="${APP_PASSWORD:-changeme}"
+APP_PW="${APP_PASSWORD:-}"
 OPENROUTER_REFERER="${OPENROUTER_REFERER:-https://photo-shot.example.com}"
+
+# APP_PASSWORD is the only thing standing between the internet and the metered
+# provider keys, so refuse to start with no password or a well-known default
+# instead of silently falling back to a guessable one.
+case "$APP_PW" in
+  "" | change-me | changeme | password | admin | secret | photoshot)
+    echo "[render-config] FATAL: APP_PASSWORD is unset or a weak default. Set a strong APP_PASSWORD (e.g. 'openssl rand -base64 24') in your .env." >&2
+    exit 1
+    ;;
+esac
+if [ "${#APP_PW}" -lt 12 ]; then
+  echo "[render-config] FATAL: APP_PASSWORD is too short (<12 chars). Use a longer random value." >&2
+  exit 1
+fi
 
 bool() { [ -n "$1" ] && printf 'true' || printf 'false'; }
 
@@ -110,6 +124,18 @@ location = /api/history/index.json {
     create_full_put_path on;
     dav_access user:rw group:rw all:r;
     client_max_body_size 8m;
+    default_type application/json;
+    add_header Cache-Control "no-store" always;
+}
+
+# Shared spend ledger: lifetime cost totals (password-gated read + write).
+location = /api/history/spend.json {
+    if (\$app_auth_ok = 0) { return 401; }
+    root /var/lib/photoshot;
+    dav_methods PUT DELETE;
+    create_full_put_path on;
+    dav_access user:rw group:rw all:r;
+    client_max_body_size 1m;
     default_type application/json;
     add_header Cache-Control "no-store" always;
 }

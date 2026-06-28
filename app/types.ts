@@ -21,7 +21,8 @@ export interface GeneratedImage {
   exifData?: string;
   cost?: number; // USD, display only
   costEstimate?: boolean; // true = "~" estimate (token-billed); false = exact price
-  model?: string;
+  model?: string; // model label, e.g. "Nano Banana Pro"
+  provider?: string; // provider key, e.g. "gemini" (for cost aggregation)
 }
 
 export interface UploadedFile {
