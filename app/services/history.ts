@@ -123,23 +123,20 @@ const monthKey = (ts: number): string => {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
 };
 
+// Returns the ledger, or null ONLY when the store definitively has none yet
+// (a clean 404 / empty localStorage). Any other failure (offline, 5xx, 401,
+// corrupt body) THROWS so callers don't mistake "couldn't load" for "doesn't
+// exist" and clobber a real ledger by backfilling over it.
 export const loadLedger = async (): Promise<SpendLedger | null> => {
   if (isDev) {
-    try {
-      const raw = localStorage.getItem(LEDGER_LS_KEY);
-      return raw ? { ...emptyLedger(), ...JSON.parse(raw) } : null;
-    } catch {
-      return null;
-    }
+    const raw = localStorage.getItem(LEDGER_LS_KEY);
+    return raw ? { ...emptyLedger(), ...JSON.parse(raw) } : null;
   }
-  try {
-    const res = await fetch(`${BASE}/spend.json`, { headers: authHeaders(), cache: 'no-store' });
-    if (!res.ok) return null; // 404 = no ledger yet
-    const data = await res.json();
-    return data && typeof data === 'object' ? { ...emptyLedger(), ...data } : null;
-  } catch {
-    return null;
-  }
+  const res = await fetch(`${BASE}/spend.json`, { headers: authHeaders(), cache: 'no-store' });
+  if (res.status === 404) return null; // definitively no ledger yet → safe to seed
+  if (!res.ok) throw new Error(`Ledger load failed (${res.status})`);
+  const data = await res.json();
+  return data && typeof data === 'object' ? { ...emptyLedger(), ...data } : null;
 };
 
 export const saveLedger = async (ledger: SpendLedger): Promise<void> => {
@@ -190,8 +187,15 @@ export const recordSpend = async (
   // recorded on another device/tab isn't clobbered by a stale in-memory base.
   // This narrows the lost-update window to a single read-modify-write; a hard
   // guarantee would need server-side compare-and-swap (ETag/If-Match), which the
-  // static nginx WebDAV store doesn't provide.
-  const current = (await loadLedger()) ?? base ?? emptyLedger();
+  // static nginx WebDAV store doesn't provide. If the re-read fails (offline
+  // blip), fall back to our in-memory copy so the spend is still recorded rather
+  // than dropped — and never below the base, so we don't shrink the total.
+  let current: SpendLedger;
+  try {
+    current = (await loadLedger()) ?? base ?? emptyLedger();
+  } catch {
+    current = base ?? emptyLedger();
+  }
   const next = addToLedger(current, [entry]);
   await saveLedger(next);
   return next;

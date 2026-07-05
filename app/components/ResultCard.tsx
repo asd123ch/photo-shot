@@ -260,4 +260,9 @@ const ResultCard: React.FC<ResultCardProps> = ({ result, onDelete }) => {
   );
 };
 
-export default ResultCard;
+// Memoize on the result's identity so a card skips re-rendering when the parent
+// re-renders for unrelated reasons (delete-confirm dialog, ledger updates, tab
+// state). History items keep their object identity across those renders. The
+// onDelete closure changes identity every parent render but always deletes this
+// same item, so it's intentionally excluded from the comparison.
+export default React.memo(ResultCard, (prev, next) => prev.result === next.result);

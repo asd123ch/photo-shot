@@ -18,7 +18,7 @@ import {
 import { providerOf } from './services/spend';
 // @ts-ignore
 import piexif from 'piexifjs';
-import { setAppPassword, getAppPassword } from './config';
+import { setAppPassword, getAppPassword, clearAppPassword } from './config';
 
 // Ratio dropdown labels (value -> friendly name).
 const RATIO_LABELS: Record<string, string> = {
@@ -97,29 +97,74 @@ const fileToDataUri = async (file: File): Promise<string> => {
   });
 };
 
-// Helper to convert image to JPEG Data URI (for PNG targets)
+// Helper to convert image to JPEG Data URI (for PNG targets / force-convert).
+// Uses createImageBitmap with imageOrientation:'from-image' so EXIF rotation is
+// baked into the pixels and the canvas is sized to the *displayed* orientation.
+// (The old <img>.width path could mis-size/rotate EXIF-rotated phone photos,
+// since we tag the output Orientation=1 afterwards.) Falls back to <img> where
+// the option is unsupported.
 const imageToJpegDataUri = async (file: File, quality = 0.95): Promise<string> => {
-    const img = new Image();
-    const url = URL.createObjectURL(file);
-    await new Promise((resolve, reject) => {
-        img.onload = resolve;
-        img.onerror = reject;
-        img.src = url;
-    });
-    URL.revokeObjectURL(url);
-    
     const canvas = document.createElement('canvas');
-    canvas.width = img.width;
-    canvas.height = img.height;
     const ctx = canvas.getContext('2d');
     if (!ctx) throw new Error("Canvas context failed");
-    
-    // Fill white background to handle transparency
-    ctx.fillStyle = '#FFFFFF';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    
-    ctx.drawImage(img, 0, 0);
+
+    let bitmap: ImageBitmap | null = null;
+    try {
+        bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' } as ImageBitmapOptions);
+    } catch {
+        bitmap = null;
+    }
+
+    if (bitmap) {
+        canvas.width = bitmap.width;
+        canvas.height = bitmap.height;
+        ctx.fillStyle = '#FFFFFF';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(bitmap, 0, 0);
+        bitmap.close();
+    } else {
+        const img = new Image();
+        const url = URL.createObjectURL(file);
+        try {
+            await new Promise((resolve, reject) => {
+                img.onload = resolve;
+                img.onerror = reject;
+                img.src = url;
+            });
+            canvas.width = img.naturalWidth || img.width;
+            canvas.height = img.naturalHeight || img.height;
+            ctx.fillStyle = '#FFFFFF';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            ctx.drawImage(img, 0, 0);
+        } finally {
+            URL.revokeObjectURL(url);
+        }
+    }
+
     return canvas.toDataURL('image/jpeg', quality);
+};
+
+// Self-contained elapsed-seconds indicator shown during a generation. Owning its
+// own timer means only this badge re-renders each second — not the whole App
+// tree (editor UI + every ResultCard). Mounts when a render starts, unmounts
+// when it ends, so it resets naturally.
+const ElapsedBadge: React.FC = () => {
+  const [elapsed, setElapsed] = useState(0);
+  useEffect(() => {
+    const id = window.setInterval(() => setElapsed((e) => e + 1), 1000);
+    return () => clearInterval(id);
+  }, []);
+  return (
+    <div className="flex-1 py-4 rounded-2xl bg-surface border border-white/10 text-gray-200 font-bold text-sm flex flex-col items-center justify-center">
+      <div className="flex items-center gap-2">
+        <div className="w-4 h-4 border-2 border-current border-t-transparent rounded-full animate-spin" />
+        <span className="tabular-nums">Processing… {elapsed}s</span>
+      </div>
+      {elapsed >= 20 && (
+        <span className="text-[11px] font-medium text-gray-400 mt-1">Large 4K renders can take a minute.</span>
+      )}
+    </div>
+  );
 };
 
 const App: React.FC = () => {
@@ -160,26 +205,15 @@ const App: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [hasKey, setHasKey] = useState(false);
-  const [elapsed, setElapsed] = useState(0);
   const [confirmingClear, setConfirmingClear] = useState(false);
 
   const latestResultRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const cancelledRef = useRef(false);
-  const elapsedTimerRef = useRef<number | null>(null);
-
-  const stopElapsedTimer = () => {
-    if (elapsedTimerRef.current !== null) {
-      clearInterval(elapsedTimerRef.current);
-      elapsedTimerRef.current = null;
-    }
-  };
 
   const handleCancel = () => {
     cancelledRef.current = true;
     abortRef.current?.abort();
-    stopElapsedTimer();
-    setElapsed(0);
     setLoading(false);
   };
 
@@ -189,6 +223,20 @@ const App: React.FC = () => {
     // logged in. (isAuthenticated is already seeded from the stored token above.)
     const savedPw = getAppPassword();
     if (savedPw) setAppPassword(savedPw);
+    // Re-validate the stored password against the server. If APP_PASSWORD was
+    // rotated, the old token is now wrong, so log out instead of leaving the
+    // user "logged in" while every /api call 401s. Only act on an explicit 401 —
+    // a network error keeps the offline session usable.
+    if (savedPw && !(import.meta as any).env?.DEV) {
+      fetch('/api/auth', { headers: { 'X-App-Password': savedPw } })
+        .then((res) => {
+          if (res.status === 401) {
+            clearAppPassword();
+            setIsAuthenticated(false);
+          }
+        })
+        .catch(() => { /* offline — keep the session; calls will retry later */ });
+    }
   }, []);
 
   // History lives on the server now (shared across devices). Load it once the
@@ -206,16 +254,18 @@ const App: React.FC = () => {
         items.filter((it) => (it.timestamp ?? 0) < cutoff).forEach((it) => void deleteImage(it.url));
         void saveHistory(fresh);
       }
-      // Load the persistent spend ledger; if there isn't one yet, seed it once
-      // from whatever history we have so existing users get a lifetime total.
-      const existing = await loadLedger();
-      if (cancelled) return;
-      if (existing) {
-        setLedger(existing);
-      } else if (fresh.length > 0) {
-        setLedger(await backfillLedger(fresh, providerOf));
-      } else {
-        setLedger(null);
+      // Load the persistent spend ledger; if there genuinely isn't one yet
+      // (clean 404), seed it once from whatever history we have so existing
+      // users get a lifetime total. If the load FAILS (offline / server error),
+      // leave the ledger unknown — never backfill over a ledger that may exist.
+      try {
+        const existing = await loadLedger();
+        if (cancelled) return;
+        if (existing) setLedger(existing);
+        else if (fresh.length > 0) setLedger(await backfillLedger(fresh, providerOf));
+        else setLedger(null);
+      } catch {
+        if (!cancelled) setLedger(null);
       }
     });
     return () => { cancelled = true; };
@@ -522,9 +572,6 @@ const App: React.FC = () => {
     const controller = new AbortController();
     abortRef.current = controller;
     cancelledRef.current = false;
-    setElapsed(0);
-    stopElapsedTimer();
-    elapsedTimerRef.current = window.setInterval(() => setElapsed((e) => e + 1), 1000);
 
     try {
       const response = await runGenerate({
@@ -592,8 +639,6 @@ const App: React.FC = () => {
         setError(err.message || "Failed to process image.");
       }
     } finally {
-      stopElapsedTimer();
-      setElapsed(0);
       abortRef.current = null;
       setLoading(false);
     }
@@ -1125,14 +1170,19 @@ const App: React.FC = () => {
                     <h2 className="text-xl font-bold">History</h2>
                     <span className="text-xs text-gray-400 tabular-nums">{results.length} {results.length === 1 ? 'item' : 'items'}</span>
                 </div>
-                
+
+                {/* Spend overview: self-hides when nothing has been spent, and
+                    stays visible (from the ledger) even after the image list is
+                    cleared, so the lifetime total never disappears. */}
+                <SpendSummary results={results} ledger={ledger} />
+
                 {results.length === 0 ? (
                      <div className="text-center text-gray-400 py-20 flex flex-col items-center">
                         <div className="w-16 h-16 bg-surface rounded-full flex items-center justify-center mb-4">
                             <HistoryIcon className="opacity-20" size={32} />
                         </div>
                         <h3 className="font-bold text-gray-400 mb-1">No history yet</h3>
-                        <p className="text-xs max-w-[200px]">Your recent creations are saved on this device and appear here.</p>
+                        <p className="text-xs max-w-[200px]">Your creations are saved on the server and appear here across your devices for 90 days.</p>
                         <button 
                              onClick={() => setActiveTab('create')}
                              className="mt-6 text-primary text-sm font-bold"
@@ -1142,8 +1192,6 @@ const App: React.FC = () => {
                     </div>
                 ) : (
                     <div className="space-y-8">
-                        <SpendSummary results={results} ledger={ledger} />
-
                         {results.map(res => (
                             <ResultCard key={res.id} result={res} onDelete={() => deleteHistoryItem(res)} />
                         ))}
@@ -1189,15 +1237,7 @@ const App: React.FC = () => {
         <div className="max-w-md mx-auto px-6 pt-2 pb-[calc(1.5rem+env(safe-area-inset-bottom))]">
             {loading && creationMode === 'editor' ? (
                 <div className="flex gap-2">
-                    <div className="flex-1 py-4 rounded-2xl bg-surface border border-white/10 text-gray-200 font-bold text-sm flex flex-col items-center justify-center">
-                        <div className="flex items-center gap-2">
-                            <div className="w-4 h-4 border-2 border-current border-t-transparent rounded-full animate-spin" />
-                            <span className="tabular-nums">Processing… {elapsed}s</span>
-                        </div>
-                        {elapsed >= 20 && (
-                            <span className="text-[11px] font-medium text-gray-400 mt-1">Large 4K renders can take a minute.</span>
-                        )}
-                    </div>
+                    <ElapsedBadge />
                     <button
                         onClick={handleCancel}
                         className="px-5 rounded-2xl bg-surface border border-white/10 text-gray-200 font-bold text-sm hover:bg-white/10 active:scale-95 transition"

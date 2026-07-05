@@ -39,8 +39,12 @@
 - **Text-to-image, image-to-image and re-edit.** Up to 5 reference images,
   inline prompt templates, and a one-tap "edit this result again" loop.
 - **Keep your results.** Download or share each generation (Web Share where
-  available), copy the exact prompt used, and browse a session history of the
-  images you made.
+  available), copy the exact prompt used, and browse a shared history of the
+  images you made — stored on the server and synced across your devices for 90
+  days, with per-image delete.
+- **Cost tracking.** A running spend overview at the top of History: lifetime
+  total, this month / today, and a breakdown per provider and per model, backed
+  by a persistent ledger that survives history cleanup and deletes.
 - **EXIF metadata copier.** Copy full EXIF, GPS only, GPS + time, or a custom
   field set from a source JPEG onto a target image, with optional pre-clear and
   PNG to JPEG conversion.
@@ -86,8 +90,11 @@ Metadata* (it appears once a reference image is added).
 
 ### History
 
-The **Archives** tab keeps the images you generated during the current session,
-so you can revisit or re-download them. *Clear All History* empties it.
+The **History** tab keeps the images you generated, stored on the server and
+synced across your devices for 90 days (older entries expire automatically). It
+opens with a **spend overview**: your lifetime total, this month / today, and a
+breakdown per provider and model. Delete a single image with its trash button,
+or *Clear All History* to empty the list — your lifetime spend total is kept.
 
 ## How it works
 
@@ -139,9 +146,9 @@ Changing a key needs a container restart, no rebuild.
 | Variable                 | Purpose                                                              |
 | ------------------------ | ------------------------------------------------------------------- |
 | `GEMINI_API_KEY`         | Google Gemini (direct) image models                                 |
-| `WAVESPEED_API_KEY`      | WaveSpeed models (Seedream, Nano Banana, GPT Image, MAI, Recraft, …)|
+| `WAVESPEED_API_KEY`      | WaveSpeed models (Seedream, Nano Banana, GPT Image, Grok, …)        |
 | `OPENROUTER_API_KEY`     | OpenRouter-routed models                                            |
-| `APP_PASSWORD`           | Unlock password; nginx checks it on every `/api` call. The real access gate, set something strong |
+| `APP_PASSWORD`           | Unlock password; nginx checks it on every `/api` call. The real access gate — **required**; the container refuses to start on an empty, well-known, or under-12-character value |
 | `CLOUDFLARE_TUNNEL_TOKEN`| Optional: expose the app via a Cloudflare Tunnel (leave empty to disable) |
 
 Copy [`.env.example`](.env.example) to `.env` and fill it in. Any unset provider
@@ -187,12 +194,16 @@ node scripts/generate-icons.mjs
 
 ## Security notes
 
-- Keys are server-side and gated by `APP_PASSWORD`; set a strong one.
+- Keys are server-side and gated by `APP_PASSWORD`. It is **required**: the
+  container refuses to start (fail closed) on an empty, well-known, or
+  under-12-character password, so a default deploy can't be left wide open.
 - nginx rate-limits `/api/auth` to slow password brute-forcing; `robots.txt`
   and a `noindex` meta keep the app out of search engines.
 - For public exposure, the Cloudflare Tunnel hides your origin IP. You can layer
   Cloudflare WAF / rate-limiting / Access on top if you want stricter gating.
 
 ## License
+
+Copyright © 2026 asd123.ai
 
 [GNU General Public License v3.0](LICENSE).
