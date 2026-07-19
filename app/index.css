@@ -2,10 +2,16 @@
 @config "./tailwind.config.js";
 
 @layer base {
-  html,
+  html {
+    --safe-area-bottom: env(safe-area-inset-bottom, 0px);
+    min-height: 100%;
+    background-color: oklch(0.145 0.006 170);
+  }
+
   body,
   #root {
-    height: 100%;
+    min-height: 100%;
+    min-height: 100dvh;
   }
 
   /* Render native controls (select popups, option/optgroup, scrollbars) in dark
@@ -14,9 +20,11 @@
     color-scheme: dark;
   }
 
-  /* App-like feel on mobile: prevent rubber-band scrolling of the page itself */
+  /* Suppress the browser's own overscroll action. App.tsx implements a guarded
+     pull gesture so normal scrolling can never reload the editor. */
+  html,
   body {
-    overscroll-behavior: none;
+    overscroll-behavior-y: none;
   }
 
   /* App-like input: no double-tap-to-zoom and no legacy 300ms tap delay (pinch
@@ -24,6 +32,23 @@
   body,
   #root {
     touch-action: manipulation;
+  }
+
+  /* react-simple-pull-to-refresh supplies the established gesture, resistance,
+     threshold and snap-back behavior. Keep Photo-Shot on natural document
+     scrolling instead of accepting the library's full-height inner scroller. */
+  .photoshot-ptr,
+  .photoshot-ptr > .ptr__children {
+    height: auto;
+    min-height: 100dvh;
+  }
+
+  .photoshot-ptr > .ptr__children {
+    overflow: visible;
+  }
+
+  .photoshot-ptr > .ptr__pull-down {
+    z-index: 60;
   }
 
   /* Visible, on-brand keyboard focus for every interactive control.

@@ -1,8 +1,9 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import PullToRefresh from 'react-simple-pull-to-refresh';
 import { UploadedFile, GeneratedImage, MetadataCopyMode, METADATA_FIELDS, MetadataField } from './types';
 import ImageUploader from './components/ImageUploader';
 import ResultCard from './components/ResultCard';
-import { runGenerate, providerKeyPresent } from './services/generate';
+import { runGenerate } from './services/generate';
 import {
   PROVIDERS, getModel, modelsByProvider, getProviderLabel, formatCost, formatUsd, closestRatio,
   DEFAULT_MODEL_KEY, Provider, finalResolution,
@@ -18,7 +19,7 @@ import {
 import { providerOf } from './services/spend';
 // @ts-ignore
 import piexif from 'piexifjs';
-import { setAppPassword, getAppPassword, clearAppPassword } from './config';
+import { PROVIDER_AVAILABLE, setAppPassword, getAppPassword, clearAppPassword } from './config';
 
 // Ratio dropdown labels (value -> friendly name).
 const RATIO_LABELS: Record<string, string> = {
@@ -34,6 +35,15 @@ const RATIO_LABELS: Record<string, string> = {
 
 // No count limit on history; entries simply expire after 90 days.
 const HISTORY_MAX_AGE_MS = 90 * 24 * 60 * 60 * 1000;
+const AVAILABLE_PROVIDERS = PROVIDERS.filter((provider) => PROVIDER_AVAILABLE[provider]);
+const HAS_ANY_PROVIDER_KEY = AVAILABLE_PROVIDERS.length > 0;
+const INITIAL_PROVIDER: Provider = AVAILABLE_PROVIDERS[0] ?? 'fal';
+const INITIAL_MODEL_KEY = INITIAL_PROVIDER === 'fal'
+  ? DEFAULT_MODEL_KEY
+  : modelsByProvider(INITIAL_PROVIDER)[0]?.key ?? DEFAULT_MODEL_KEY;
+const DEFAULT_IMAGE_MODEL_KEY = AVAILABLE_PROVIDERS
+  .flatMap(modelsByProvider)
+  .find((model) => model.input !== 'text' && model.maxImages > 0)?.key ?? INITIAL_MODEL_KEY;
 
 const PROMPT_TEMPLATES = [
   {
@@ -179,8 +189,8 @@ const App: React.FC = () => {
   // Editor State
   const [files, setFiles] = useState<UploadedFile[]>([]);
   const [prompt, setPrompt] = useState('');
-  const [provider, setProvider] = useState<Provider>('gemini');
-  const [modelKey, setModelKey] = useState<string>(DEFAULT_MODEL_KEY);
+  const [provider, setProvider] = useState<Provider>(INITIAL_PROVIDER);
+  const [modelKey, setModelKey] = useState<string>(INITIAL_MODEL_KEY);
   const [ratio, setRatio] = useState<string>('auto');
   const [resolution, setResolution] = useState<string>('1K');
   const [quality, setQuality] = useState<string>('medium');
@@ -188,6 +198,11 @@ const App: React.FC = () => {
   const [webSearch, setWebSearch] = useState(false);
   const [imageSearch, setImageSearch] = useState(false);
   const [flex, setFlex] = useState(false);
+  const [upscaleMode, setUpscaleMode] = useState<'factor' | 'target'>('factor');
+  const [upscaleFactor, setUpscaleFactor] = useState(2);
+  const [targetResolution, setTargetResolution] = useState('1080p');
+  const [creativity, setCreativity] = useState(0);
+  const [noiseScale, setNoiseScale] = useState(0.1);
 
   // Metadata Tool State
   const [metadataSourceFiles, setMetadataSourceFiles] = useState<UploadedFile[]>([]);
@@ -204,12 +219,38 @@ const App: React.FC = () => {
   const [latestResult, setLatestResult] = useState<GeneratedImage | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [hasKey, setHasKey] = useState(false);
   const [confirmingClear, setConfirmingClear] = useState(false);
 
   const latestResultRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const cancelledRef = useRef(false);
+  const refreshingRef = useRef(false);
+
+  const refreshApp = useCallback(async () => {
+    if (refreshingRef.current) return;
+    refreshingRef.current = true;
+    try {
+      const registration = await navigator.serviceWorker?.getRegistration();
+      if (registration) {
+        await registration.update();
+        const worker = registration.installing;
+        if (worker && worker.state !== 'activated') {
+          await new Promise<void>((resolve) => {
+            const timeout = window.setTimeout(resolve, 1500);
+            worker.addEventListener('statechange', () => {
+              if (worker.state === 'activated') {
+                window.clearTimeout(timeout);
+                resolve();
+              }
+            });
+          });
+        }
+      }
+    } catch {
+      // A network/service-worker failure must not block a normal page reload.
+    }
+    window.location.reload();
+  }, []);
 
   const handleCancel = () => {
     cancelledRef.current = true;
@@ -218,7 +259,6 @@ const App: React.FC = () => {
   };
 
   useEffect(() => {
-    providerKeyPresent('gemini').then(setHasKey);
     // Slide the 90-day login window forward on each launch so active users stay
     // logged in. (isAuthenticated is already seeded from the stored token above.)
     const savedPw = getAppPassword();
@@ -278,11 +318,10 @@ const App: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [provider]);
 
-  // When the model changes, reset options to what that model supports + refresh key state.
+  // When the model changes, reset options to what that model supports.
   useEffect(() => {
     const def = getModel(modelKey);
     if (!def) return;
-    providerKeyPresent(def.provider).then(setHasKey);
     setRatio((prev) => (prev !== 'auto' && def.ratios.length > 0 && !def.ratios.includes(prev) ? 'auto' : prev));
     setResolution(def.defaultResolution ?? (def.resolutions[0] ?? ''));
     setQuality(def.extras?.quality?.default ?? 'medium');
@@ -290,6 +329,11 @@ const App: React.FC = () => {
     setWebSearch(false);
     setImageSearch(false);
     setFlex(false);
+    setUpscaleMode(def.upscaleOptions?.mode?.default ?? 'factor');
+    setUpscaleFactor(def.upscaleOptions?.scaleFactor?.default ?? 2);
+    setTargetResolution(def.upscaleOptions?.targetResolution?.default ?? '1080p');
+    setCreativity(def.upscaleOptions?.creativity?.default ?? 0);
+    setNoiseScale(def.upscaleOptions?.noiseScale?.default ?? 0.1);
     setFiles((prev) => {
       // Text-to-image models use no reference image; keep any uploaded files in
       // state (just hidden) so switching back to an image model restores them.
@@ -345,8 +389,8 @@ const App: React.FC = () => {
     setPrompt('');
     setLatestResult(null);
     if (creationMode === 'editor') {
-        setProvider('gemini');
-        setModelKey(DEFAULT_MODEL_KEY);
+        setProvider(INITIAL_PROVIDER);
+        setModelKey(INITIAL_MODEL_KEY);
         setRatio('auto');
         // resolution / quality / extras are reset by the model-change effect
     } else {
@@ -547,8 +591,13 @@ const App: React.FC = () => {
     const def = getModel(modelKey);
     if (!def) { setError("Unknown model."); return; }
 
-    if (!hasKey) {
-        setError(`No ${getProviderLabel(def.provider)} API key is configured on the server.`);
+    if (!PROVIDER_AVAILABLE[def.provider]) {
+        if (HAS_ANY_PROVIDER_KEY) {
+            setProvider(INITIAL_PROVIDER);
+            setModelKey(INITIAL_MODEL_KEY);
+            return;
+        }
+        setError('No provider API key is configured on the server.');
         return;
     }
 
@@ -585,6 +634,11 @@ const App: React.FC = () => {
         webSearch,
         imageSearch,
         flex,
+        upscaleMode,
+        upscaleFactor,
+        targetResolution,
+        creativity,
+        noiseScale,
         signal: controller.signal,
       });
 
@@ -648,7 +702,11 @@ const App: React.FC = () => {
   const costHint = (): string => {
     const def = getModel(modelKey);
     if (!def) return '';
-    return formatCost(def, { resolution, quality, webSearch, imageSearch, flex });
+    const first = files[0];
+    const megapixels = def.pricing.kind === 'perMegapixel' && first?.width && first?.height && upscaleMode !== 'target'
+      ? (first.width * first.height * upscaleFactor ** 2) / 1_000_000
+      : undefined;
+    return formatCost(def, { resolution, quality, webSearch, imageSearch, flex, imageCount: files.length, megapixels });
   };
 
   // Re-edit loop: load the previous result back in as the input and let the
@@ -686,9 +744,9 @@ const App: React.FC = () => {
       // so the image stays usable and visible in the uploader.
       const cur = getModel(modelKey);
       if (!cur || cur.input === 'text' || cur.maxImages === 0) {
-        const fallback = getModel(DEFAULT_MODEL_KEY)!;
+        const fallback = getModel(DEFAULT_IMAGE_MODEL_KEY)!;
         setProvider(fallback.provider);
-        setModelKey(DEFAULT_MODEL_KEY);
+        setModelKey(fallback.key);
       }
       setFiles([uploaded]);
       setPrompt('');
@@ -747,29 +805,49 @@ const App: React.FC = () => {
   const providerModels = modelsByProvider(provider);
 
   return (
-    <div className="min-h-full">
+    <PullToRefresh
+      onRefresh={refreshApp}
+      pullDownThreshold={70}
+      maxPullDownDistance={95}
+      resistance={2.5}
+      backgroundColor="oklch(0.145 0.006 170)"
+      className="photoshot-ptr"
+      pullingContent={(
+        <div role="status" className="flex items-center justify-center gap-2 pt-[calc(env(safe-area-inset-top)+0.75rem)] text-xs font-bold text-gray-300">
+          <ArrowDown size={15} aria-hidden="true" />
+          Pull to refresh
+        </div>
+      )}
+      refreshingContent={(
+        <div role="status" aria-live="polite" className="flex items-center justify-center gap-2 pt-[calc(env(safe-area-inset-top)+0.75rem)] text-xs font-bold text-primary">
+          <RefreshCw size={15} className="animate-spin" aria-hidden="true" />
+          Release to refresh
+        </div>
+      )}
+    >
+      <div className="relative min-h-full">
       <header className="sticky top-0 z-50 bg-background/80 backdrop-blur-md border-b border-white/5 px-6 pb-4 pt-[calc(1rem+env(safe-area-inset-top))] flex items-center justify-between gap-2">
         <button
             type="button"
-            className="flex items-center gap-2 cursor-pointer -m-2 p-2 min-w-0"
-            onClick={() => (activeTab === 'create' ? window.location.reload() : setActiveTab('create'))}
-            aria-label={activeTab === 'create' ? 'Photo-Shot home (reload)' : 'Back to editor'}
+            className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden cursor-pointer -m-2 p-2"
+            onClick={() => (activeTab === 'create' ? window.scrollTo({ top: 0, behavior: 'smooth' }) : setActiveTab('create'))}
+            aria-label={activeTab === 'create' ? 'Photo-Shot home' : 'Back to editor'}
         >
           {activeTab !== 'create' ? (
               <ArrowLeft className="w-5 h-5 text-gray-400 flex-shrink-0" aria-hidden="true" />
           ) : (
               <img src="/icons/chameleon.png" alt="" aria-hidden="true" className="w-7 h-7 object-contain flex-shrink-0" />
           )}
-          <h1 className="font-bold text-lg tracking-tight whitespace-nowrap">Photo-Shot</h1>
+          <h1 className="truncate whitespace-nowrap font-bold text-lg tracking-tight">Photo-Shot</h1>
         </button>
 
-        <div className="flex items-center gap-1.5">
-             {!hasKey && activeTab === 'create' && isEditor && (
+        <div className="flex shrink-0 items-center gap-1.5">
+             {!HAS_ANY_PROVIDER_KEY && activeTab === 'create' && isEditor && (
                  <span
                      className="text-[10px] bg-error/20 text-error px-2 py-1.5 rounded-md font-bold flex items-center"
-                     title="This provider has no API key set in the server .env"
+                     title="No provider has an API key set in the server .env"
                  >
-                     No key
+                     No API keys
                  </span>
              )}
 
@@ -811,7 +889,7 @@ const App: React.FC = () => {
         </div>
       </header>
 
-      <main className="p-6 space-y-8 max-w-md mx-auto">
+      <main className={`mx-auto max-w-md space-y-8 px-6 pt-6 ${activeTab === 'create' ? 'pb-6' : 'pb-[calc(1.5rem+var(--safe-area-bottom))]'}`}>
         {activeTab === 'create' && (
             <div className="animate-fade-in">
                 
@@ -840,7 +918,7 @@ const App: React.FC = () => {
                                 files={files}
                                 setFiles={setFiles}
                                 maxFiles={def.maxImages}
-                                label={def.input === 'edit' ? 'Reference Image (required)' : 'Reference Image (optional)'}
+                                label={def.category === 'upscale' ? 'Image to upscale (required)' : def.input === 'edit' ? 'Reference Image (required)' : 'Reference Image (optional)'}
                             />
                         </section>
                     )}
@@ -854,7 +932,7 @@ const App: React.FC = () => {
                     {/* --- EDITOR MODE UI --- */}
                     {isEditor && (
                         <>
-                            <section className="space-y-3">
+                            {def.category !== 'upscale' && <section className="space-y-3">
                                 <label className="text-sm font-medium text-gray-400">Instructions</label>
                                 <TemplateMenu categories={PROMPT_TEMPLATES} onSelect={setPrompt} />
 
@@ -868,22 +946,34 @@ const App: React.FC = () => {
                                         className="w-full bg-surface border border-gray-700 rounded-2xl p-4 text-base focus:ring-2 focus:ring-primary focus:border-transparent outline-none resize-none h-32"
                                     />
                                 </div>
-                            </section>
+                            </section>}
 
                             <section className="space-y-4">
                                 {/* Provider */}
                                 <div className="space-y-2">
                                     <label className="text-xs font-bold text-gray-400 uppercase tracking-wider">Provider</label>
                                     <div className="grid grid-cols-3 gap-2">
-                                        {PROVIDERS.map((p) => (
-                                            <button
-                                                key={p}
-                                                onClick={() => setProvider(p)}
-                                                className={`py-2.5 px-2 rounded-xl border text-[11px] font-bold transition ${provider === p ? 'bg-primary/20 border-primary text-white' : 'bg-surface border-gray-700 text-gray-400 hover:bg-white/5 hover:text-gray-300'}`}
-                                            >
-                                                {getProviderLabel(p)}
-                                            </button>
-                                        ))}
+                                        {PROVIDERS.map((p) => {
+                                            const available = PROVIDER_AVAILABLE[p];
+                                            return (
+                                                <button
+                                                    key={p}
+                                                    type="button"
+                                                    onClick={() => setProvider(p)}
+                                                    disabled={!available}
+                                                    title={available ? undefined : 'No API key configured'}
+                                                    className={`py-2.5 px-2 rounded-xl border text-[11px] font-bold transition ${
+                                                        !available
+                                                        ? 'bg-surface/50 border-gray-800 text-gray-600 cursor-not-allowed opacity-60'
+                                                        : provider === p
+                                                        ? 'bg-primary/20 border-primary text-white'
+                                                        : 'bg-surface border-gray-700 text-gray-400 hover:bg-white/5 hover:text-gray-300'
+                                                    }`}
+                                                >
+                                                    {getProviderLabel(p)}
+                                                </button>
+                                            );
+                                        })}
                                     </div>
                                 </div>
 
@@ -896,11 +986,19 @@ const App: React.FC = () => {
                                         onChange={(e) => setModelKey(e.target.value)}
                                         className="w-full bg-surface border border-gray-700 text-white text-sm rounded-xl p-3 outline-none focus:ring-2 focus:ring-primary"
                                     >
-                                        {providerModels.map((m) => (
-                                            <option key={m.key} value={m.key}>
-                                                {m.label} · {formatCost(m, { resolution: m.defaultResolution, quality: m.extras?.quality?.default })}
-                                            </option>
-                                        ))}
+                                        {(['edit', 'upscale'] as const).map((category) => {
+                                            const grouped = providerModels.filter((m) => (m.category ?? 'edit') === category);
+                                            if (grouped.length === 0) return null;
+                                            return (
+                                                <optgroup key={category} label={category === 'upscale' ? 'Upscale' : 'Image editing'}>
+                                                    {grouped.map((m) => (
+                                                        <option key={m.key} value={m.key}>
+                                                            {m.label} · {formatCost(m, { resolution: m.defaultResolution, quality: m.extras?.quality?.default })}
+                                                        </option>
+                                                    ))}
+                                                </optgroup>
+                                            );
+                                        })}
                                     </select>
                                 </div>
 
@@ -950,7 +1048,7 @@ const App: React.FC = () => {
                                 </div>
 
                                 {/* Model-specific extras */}
-                                {(def.extras?.quality || def.outputFormats || def.extras?.webSearch || def.extras?.imageSearch || def.flex) && (
+                                {(def.extras?.quality || def.outputFormats || def.extras?.webSearch || def.extras?.imageSearch || def.flex || def.upscaleOptions) && (
                                     <div className="space-y-2">
                                         <label className="text-xs font-bold text-gray-400 uppercase tracking-wider">Options</label>
                                         {(def.extras?.quality || def.outputFormats) && (
@@ -981,15 +1079,94 @@ const App: React.FC = () => {
                                                 )}
                                             </div>
                                         )}
+                                        {def.upscaleOptions && (
+                                            <div className="grid grid-cols-2 gap-2">
+                                                {def.upscaleOptions.mode && (
+                                                    <select
+                                                        value={upscaleMode}
+                                                        onChange={(e) => setUpscaleMode(e.target.value as 'factor' | 'target')}
+                                                        aria-label="Upscale mode"
+                                                        className="w-full bg-surface border border-gray-700 text-white text-sm rounded-xl p-3 outline-none focus:ring-2 focus:ring-primary"
+                                                    >
+                                                        <option value="factor">By factor</option>
+                                                        <option value="target">Target resolution</option>
+                                                    </select>
+                                                )}
+                                                {def.upscaleOptions.scaleFactor && (!def.upscaleOptions.mode || upscaleMode === 'factor') && (
+                                                    <label className="relative">
+                                                        <span className="sr-only">Scale factor</span>
+                                                        <input
+                                                            type="number"
+                                                            value={upscaleFactor}
+                                                            min={def.upscaleOptions.scaleFactor.min}
+                                                            max={def.upscaleOptions.scaleFactor.max}
+                                                            step={def.upscaleOptions.scaleFactor.step}
+                                                            onChange={(e) => {
+                                                                const value = e.currentTarget.valueAsNumber;
+                                                                if (Number.isFinite(value)) setUpscaleFactor(value);
+                                                            }}
+                                                            className="w-full bg-surface border border-gray-700 text-white text-sm rounded-xl p-3 pr-8 outline-none focus:ring-2 focus:ring-primary"
+                                                        />
+                                                        <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-xs text-gray-400">×</span>
+                                                    </label>
+                                                )}
+                                                {def.upscaleOptions.targetResolution && upscaleMode === 'target' && (
+                                                    <select
+                                                        value={targetResolution}
+                                                        onChange={(e) => setTargetResolution(e.target.value)}
+                                                        aria-label="Target resolution"
+                                                        className="w-full bg-surface border border-gray-700 text-white text-sm rounded-xl p-3 outline-none focus:ring-2 focus:ring-primary uppercase"
+                                                    >
+                                                        {def.upscaleOptions.targetResolution.values.map((value) => (
+                                                            <option key={value} value={value}>{value}</option>
+                                                        ))}
+                                                    </select>
+                                                )}
+                                                {def.upscaleOptions.creativity && (
+                                                    <label className="space-y-1">
+                                                        <span className="block text-[10px] font-bold uppercase tracking-wide text-gray-400">Creativity</span>
+                                                        <input
+                                                            type="number"
+                                                            value={creativity}
+                                                            min={def.upscaleOptions.creativity.min}
+                                                            max={def.upscaleOptions.creativity.max}
+                                                            step={def.upscaleOptions.creativity.step}
+                                                            onChange={(e) => {
+                                                                const value = e.currentTarget.valueAsNumber;
+                                                                if (Number.isFinite(value)) setCreativity(value);
+                                                            }}
+                                                            className="w-full bg-surface border border-gray-700 text-white text-sm rounded-xl p-3 outline-none focus:ring-2 focus:ring-primary"
+                                                        />
+                                                    </label>
+                                                )}
+                                                {def.upscaleOptions.noiseScale && (
+                                                    <label className="space-y-1">
+                                                        <span className="block text-[10px] font-bold uppercase tracking-wide text-gray-400">Noise</span>
+                                                        <input
+                                                            type="number"
+                                                            value={noiseScale}
+                                                            min={def.upscaleOptions.noiseScale.min}
+                                                            max={def.upscaleOptions.noiseScale.max}
+                                                            step={def.upscaleOptions.noiseScale.step}
+                                                            onChange={(e) => {
+                                                                const value = e.currentTarget.valueAsNumber;
+                                                                if (Number.isFinite(value)) setNoiseScale(value);
+                                                            }}
+                                                            className="w-full bg-surface border border-gray-700 text-white text-sm rounded-xl p-3 outline-none focus:ring-2 focus:ring-primary"
+                                                        />
+                                                    </label>
+                                                )}
+                                            </div>
+                                        )}
                                         <div className="flex flex-wrap gap-2">
                                             {def.extras?.webSearch && (
                                                 <button onClick={() => setWebSearch((v) => !v)} className={`text-[11px] font-bold px-3 py-2 rounded-lg border transition ${webSearch ? 'bg-primary/20 border-primary text-white' : 'bg-surface border-gray-700 text-gray-400 hover:bg-white/5 hover:text-gray-300'}`}>
-                                                    {webSearch ? '✓ ' : ''}Web search (+$0.014)
+                                                    {webSearch ? '✓ ' : ''}Web search (+${formatUsd(def.extras.webSearchUsd ?? 0.014)})
                                                 </button>
                                             )}
                                             {def.extras?.imageSearch && (
                                                 <button onClick={() => setImageSearch((v) => !v)} className={`text-[11px] font-bold px-3 py-2 rounded-lg border transition ${imageSearch ? 'bg-primary/20 border-primary text-white' : 'bg-surface border-gray-700 text-gray-400 hover:bg-white/5 hover:text-gray-300'}`}>
-                                                    {imageSearch ? '✓ ' : ''}Image search (+$0.014)
+                                                    {imageSearch ? '✓ ' : ''}Image search (+${formatUsd(def.extras.imageSearchUsd ?? 0.014)})
                                                 </button>
                                             )}
                                             {def.flex && (
@@ -1234,7 +1411,7 @@ const App: React.FC = () => {
       </main>
 
       {activeTab === 'create' && (
-        <div className="max-w-md mx-auto px-6 pt-2 pb-[calc(1.5rem+env(safe-area-inset-bottom))]">
+        <div className="max-w-md mx-auto px-6 pt-2 pb-[calc(1.5rem+var(--safe-area-bottom))]">
             {loading && creationMode === 'editor' ? (
                 <div className="flex gap-2">
                     <ElapsedBadge />
@@ -1270,7 +1447,8 @@ const App: React.FC = () => {
             )}
         </div>
       )}
-    </div>
+      </div>
+    </PullToRefresh>
   );
 };
 

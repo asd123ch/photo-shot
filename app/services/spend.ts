@@ -9,8 +9,10 @@ export const providerOf = (item: { provider?: string; model?: string }): string 
   return def?.provider ?? 'unknown';
 };
 
-export const providerLabel = (p: string): string =>
-  p === 'gemini' || p === 'wavespeed' || p === 'openrouter' ? getProviderLabel(p as Provider) : 'Other';
+export const providerLabel = (p: string): string => {
+  if (p === 'gemini') return 'Gemini (legacy)';
+  return p === 'fal' || p === 'wavespeed' || p === 'openrouter' ? getProviderLabel(p as Provider) : 'Other';
+};
 
 export interface GroupSpend {
   key: string;

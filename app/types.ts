@@ -22,7 +22,7 @@ export interface GeneratedImage {
   cost?: number; // USD, display only
   costEstimate?: boolean; // true = "~" estimate (token-billed); false = exact price
   model?: string; // model label, e.g. "Nano Banana Pro"
-  provider?: string; // provider key, e.g. "gemini" (for cost aggregation)
+  provider?: string; // provider key, e.g. "fal" (for cost aggregation)
 }
 
 export interface UploadedFile {

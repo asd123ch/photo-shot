@@ -3,10 +3,11 @@
 // One entry per selectable model, with everything the UI and adapters need:
 // supported aspect ratios, resolutions, multi-image limits, output formats,
 // pricing, OpenRouter FLEX support and model-specific extras. Data sourced from
-// the official provider docs (Gemini API, wavespeed.ai model schemas, OpenRouter
-// docs) — see the research matrix in the project history.
+// the official provider docs (fal.ai, wavespeed.ai and OpenRouter) — see the
+// research matrix in the project history.
 
-export type Provider = 'gemini' | 'wavespeed' | 'openrouter';
+export type Provider = 'fal' | 'wavespeed' | 'openrouter';
+export type ModelCategory = 'edit' | 'upscale';
 
 // 'text' = text-to-image only (no reference image)
 // 'edit' = requires at least one reference image
@@ -16,7 +17,11 @@ export type InputMode = 'text' | 'edit' | 'both';
 export type Pricing =
   | { kind: 'flat'; usd: number }                                   // same price for any resolution
   | { kind: 'perResolution'; usd: Record<string, number> }          // resolution token -> price
+  | { kind: 'flatPlusImages'; usd: number; extraImageUsd: number; includedImages: number }
+  | { kind: 'perResolutionPlusImages'; usd: Record<string, number>; extraImageUsd: number; includedImages: number }
   | { kind: 'qualityRes'; usd: Record<string, Record<string, number>> } // quality -> resolution -> price
+  | { kind: 'qualityResEstimate'; usd: Record<string, Record<string, number>> }
+  | { kind: 'perMegapixel'; usd: number }
   | { kind: 'from'; usd: number }                                   // "from $X / image"
   | { kind: 'token'; inPerM: number; outPerM: number; estPerImage?: number }; // token-billed
 
@@ -24,11 +29,22 @@ export interface ModelExtras {
   quality?: { values: string[]; default: string }; // e.g. gpt-image-2
   webSearch?: boolean;   // wavespeed nano-banana: enable_web_search (+$0.014)
   imageSearch?: boolean; // wavespeed nano-banana-2: enable_image_search (+$0.014)
+  webSearchUsd?: number;
+  imageSearchUsd?: number;
+}
+
+export interface UpscaleOptions {
+  scaleFactor?: { min: number; max: number; step: number; default: number };
+  creativity?: { min: number; max: number; step: number; default: number };
+  mode?: { values: Array<'factor' | 'target'>; default: 'factor' | 'target' };
+  targetResolution?: { values: string[]; default: string };
+  noiseScale?: { min: number; max: number; step: number; default: number };
 }
 
 export interface ModelDef {
   key: string;          // unique internal key
   provider: Provider;
+  category?: ModelCategory; // default: edit
   apiModel: string;     // endpoint path / slug / model id used in the request
   label: string;        // UI display name
   tag: string;          // short descriptor
@@ -37,7 +53,10 @@ export interface ModelDef {
   ratios: string[];     // supported aspect-ratio enum (no 'auto'); [] = model decides / none
   freeSize?: boolean;   // size derived from ratio x long-edge (Seedream wavespeed)
   pixelBudget?: number; // output sized by a total-pixel budget spread over the ratio (e.g. Grok 2K)
+  resolutionPixelBudgets?: Record<string, number>; // area budget selected by resolution tier
   baseLongEdge?: number;// resolution-less model with a fixed long edge
+  resolutionLongEdges?: Record<string, number>; // model-specific long-edge caps
+  upscaleOptions?: UpscaleOptions;
   singleImageParam?: boolean; // WaveSpeed edit models that take a single `image` param instead of `images`
   outputModalities?: string[]; // OpenRouter modalities; default ['image','text'], image-only models use ['image']
   resolutions: string[];// display tokens, e.g. ['1K','2K','4K']; [] = N/A
@@ -55,9 +74,10 @@ const EXTREME = ['4:1', '1:4', '8:1', '1:8'];
 const NB2_RATIOS = [...STD, ...EXTREME];
 const SEEDREAM_RATIOS = ['1:1', '4:3', '3:4', '16:9', '9:16', '3:2', '2:3', '21:9'];
 const GROK_RATIOS = ['1:1', '4:3', '3:4', '16:9', '9:16', '3:2', '2:3'];
+const FAL_GROK_RATIOS = ['2:1', '16:9', '4:3', '3:2', '1:1', '2:3', '3:4', '9:16', '1:2'];
 
 const PROVIDER_LABELS: Record<Provider, string> = {
-  gemini: 'Gemini (AI Studio)',
+  fal: 'fal.ai',
   wavespeed: 'WaveSpeed',
   openrouter: 'OpenRouter',
 };
@@ -69,35 +89,194 @@ export const getProviderLabel = (p: Provider): string => PROVIDER_LABELS[p];
 // ---------------------------------------------------------------------------
 
 export const MODELS: ModelDef[] = [
-  // --- Gemini (direct) -----------------------------------------------------
+  // --- fal.ai --------------------------------------------------------------
   {
-    key: 'gemini:flash',
-    provider: 'gemini',
-    apiModel: 'gemini-3.1-flash-image', // GA id (preview shut down 2026-06-25)
+    key: 'fal:seedream-v5-lite-edit',
+    provider: 'fal',
+    apiModel: 'fal-ai/bytedance/seedream/v5/lite/edit',
+    label: 'Seedream v5 Lite',
+    tag: 'Edit · cheap',
+    input: 'edit',
+    maxImages: 5,
+    ratios: SEEDREAM_RATIOS,
+    resolutions: ['2K', '3K', '4K'],
+    defaultResolution: '4K',
+    pricing: { kind: 'flat', usd: 0.035 },
+  },
+  {
+    key: 'fal:grok-imagine-quality-edit',
+    provider: 'fal',
+    apiModel: 'xai/grok-imagine-image/quality/edit',
+    label: 'Grok Imagine Quality',
+    tag: 'Edit · quality',
+    input: 'edit',
+    maxImages: 3,
+    ratios: FAL_GROK_RATIOS,
+    resolutions: ['2K'],
+    defaultResolution: '2K',
+    outputFormats: ['jpeg', 'png', 'webp'],
+    pricing: { kind: 'perResolutionPlusImages', usd: { '1K': 0.05, '2K': 0.07 }, extraImageUsd: 0.01, includedImages: 0 },
+  },
+  {
+    key: 'fal:nano-banana-2-edit',
+    provider: 'fal',
+    apiModel: 'fal-ai/nano-banana-2/edit',
     label: 'Nano Banana 2',
-    tag: 'Flash · fast',
-    input: 'both',
+    tag: 'Edit · fast',
+    input: 'edit',
     maxImages: 5,
     ratios: NB2_RATIOS,
     resolutions: ['2K', '4K'],
     defaultResolution: '2K',
-    pricing: { kind: 'perResolution', usd: { '0.5K': 0.045, '1K': 0.067, '2K': 0.101, '4K': 0.151 } },
+    outputFormats: ['png', 'jpeg', 'webp'],
+    pricing: { kind: 'perResolution', usd: { '1K': 0.08, '2K': 0.12, '4K': 0.16 } },
+    extras: { webSearch: true, webSearchUsd: 0.015 },
   },
   {
-    key: 'gemini:pro',
-    provider: 'gemini',
-    apiModel: 'gemini-3-pro-image',
-    label: 'Nano Banana Pro',
-    tag: 'Best quality',
-    input: 'both',
+    key: 'fal:gpt-image-2-edit',
+    provider: 'fal',
+    apiModel: 'openai/gpt-image-2/edit',
+    label: 'GPT Image 2',
+    tag: 'Edit · precise',
+    input: 'edit',
     maxImages: 5,
     ratios: STD,
     resolutions: ['2K', '4K'],
     defaultResolution: '2K',
-    pricing: { kind: 'perResolution', usd: { '1K': 0.134, '2K': 0.134, '4K': 0.24 } },
+    resolutionPixelBudgets: { '2K': 2048 * 2048, '4K': 3840 * 2160 },
+    outputFormats: ['png', 'jpeg', 'webp'],
+    pricing: {
+      kind: 'qualityResEstimate',
+      usd: {
+        low: { '2K': 0.017, '4K': 0.024 },
+        medium: { '2K': 0.053, '4K': 0.113 },
+        high: { '2K': 0.158, '4K': 0.413 },
+      },
+    },
+    extras: { quality: { values: ['low', 'medium', 'high'], default: 'medium' } },
+    notes: 'Price varies with output dimensions and prompt complexity.',
+  },
+  {
+    key: 'fal:nano-banana-pro-edit',
+    provider: 'fal',
+    apiModel: 'fal-ai/nano-banana-pro/edit',
+    label: 'Nano Banana Pro',
+    tag: 'Edit · best quality',
+    input: 'edit',
+    maxImages: 5,
+    ratios: STD,
+    resolutions: ['2K', '4K'],
+    defaultResolution: '2K',
+    outputFormats: ['png', 'jpeg', 'webp'],
+    pricing: { kind: 'perResolution', usd: { '1K': 0.15, '2K': 0.15, '4K': 0.30 } },
+    extras: { webSearch: true, webSearchUsd: 0.015 },
+  },
+  {
+    key: 'fal:seedream-v5-pro-edit',
+    provider: 'fal',
+    apiModel: 'bytedance/seedream/v5/pro/edit',
+    label: 'Seedream v5 Pro',
+    tag: 'Edit · pro',
+    input: 'edit',
+    maxImages: 5,
+    ratios: SEEDREAM_RATIOS,
+    resolutions: ['2K'],
+    defaultResolution: '2K',
+    outputFormats: ['jpeg', 'png'],
+    pricing: { kind: 'flatPlusImages', usd: 0.135, extraImageUsd: 0.0045, includedImages: 1 },
+  },
+  {
+    key: 'fal:seedream-v45-edit',
+    provider: 'fal',
+    apiModel: 'fal-ai/bytedance/seedream/v4.5/edit',
+    label: 'Seedream v4.5',
+    tag: 'Edit',
+    input: 'edit',
+    maxImages: 5,
+    ratios: SEEDREAM_RATIOS,
+    resolutions: ['2K', '4K'],
+    defaultResolution: '4K',
+    pricing: { kind: 'flat', usd: 0.04 },
+  },
+  {
+    key: 'fal:grok-imagine-edit',
+    provider: 'fal',
+    apiModel: 'xai/grok-imagine-image/edit',
+    label: 'Grok Imagine',
+    tag: 'Edit · fast',
+    input: 'edit',
+    maxImages: 3,
+    ratios: FAL_GROK_RATIOS,
+    resolutions: ['2K'],
+    defaultResolution: '2K',
+    outputFormats: ['jpeg', 'png', 'webp'],
+    pricing: { kind: 'flatPlusImages', usd: 0.02, extraImageUsd: 0.002, includedImages: 0 },
+  },
+  {
+    key: 'fal:crystal-upscaler',
+    provider: 'fal',
+    category: 'upscale',
+    apiModel: 'clarityai/crystal-upscaler',
+    label: 'Crystal Upscaler',
+    tag: 'Upscale · portraits',
+    input: 'edit',
+    maxImages: 1,
+    ratios: [],
+    resolutions: [],
+    outputFormats: ['jpg', 'png'],
+    upscaleOptions: {
+      scaleFactor: { min: 1, max: 200, step: 0.1, default: 2 },
+      creativity: { min: 0, max: 10, step: 0.1, default: 0 },
+    },
+    pricing: { kind: 'perMegapixel', usd: 0.016 },
+  },
+  {
+    key: 'fal:seedvr-upscale',
+    provider: 'fal',
+    category: 'upscale',
+    apiModel: 'fal-ai/seedvr/upscale/image',
+    label: 'SeedVR2 Upscaler',
+    tag: 'Upscale · general',
+    input: 'edit',
+    maxImages: 1,
+    ratios: [],
+    resolutions: [],
+    outputFormats: ['jpg', 'png', 'webp'],
+    upscaleOptions: {
+      mode: { values: ['factor', 'target'], default: 'factor' },
+      scaleFactor: { min: 1, max: 10, step: 0.1, default: 2 },
+      targetResolution: { values: ['720p', '1080p', '1440p', '2160p'], default: '1080p' },
+      noiseScale: { min: 0, max: 1, step: 0.001, default: 0.1 },
+    },
+    pricing: { kind: 'perMegapixel', usd: 0.001 },
   },
 
   // --- WaveSpeed -----------------------------------------------------------
+  {
+    key: 'wavespeed:seedream-v5-pro-edit',
+    provider: 'wavespeed',
+    apiModel: 'bytedance/seedream-v5.0-pro/edit',
+    label: 'Seedream v5 Pro',
+    tag: 'Edit · pro',
+    input: 'edit',
+    // API accepts up to 10 reference images; we cap at 5 like the other models
+    // (keeps the base64 payload under nginx's 30m limit).
+    maxImages: 5,
+    ratios: SEEDREAM_RATIOS,
+    // Pro uses aspect_ratio + a `resolution` tier (1k/2k) — NOT the free `size`
+    // param the Lite / v4.5 variants use, so no `freeSize`. 2K is its max; we
+    // expose only 2K (min-2K house rule). The first reference image is
+    // included; WaveSpeed charges $0.003 for each additional image.
+    resolutions: ['2K'],
+    defaultResolution: '2K',
+    outputFormats: ['jpeg', 'png'],
+    pricing: {
+      kind: 'perResolutionPlusImages',
+      usd: { '1K': 0.045, '2K': 0.09 },
+      extraImageUsd: 0.003,
+      includedImages: 1,
+    },
+  },
   {
     key: 'wavespeed:seedream-v5-lite-edit',
     provider: 'wavespeed',
@@ -112,6 +291,7 @@ export const MODELS: ModelDef[] = [
     defaultResolution: '4K',
     outputFormats: ['jpeg', 'png'],
     pricing: { kind: 'flat', usd: 0.035 },
+    notes: 'WaveSpeed documents output up to 4K; 8K is not supported.',
   },
   {
     key: 'wavespeed:seedream-v45-edit',
@@ -308,11 +488,11 @@ const MODEL_BY_LABEL: Record<string, ModelDef> = Object.fromEntries(
 
 export const findModelByLabel = (label: string): ModelDef | undefined => MODEL_BY_LABEL[label];
 
-export const PROVIDERS: Provider[] = ['gemini', 'wavespeed', 'openrouter'];
+export const PROVIDERS: Provider[] = ['fal', 'wavespeed', 'openrouter'];
 
 export const modelsByProvider = (p: Provider): ModelDef[] => MODELS.filter((m) => m.provider === p);
 
-export const DEFAULT_MODEL_KEY = 'gemini:flash';
+export const DEFAULT_MODEL_KEY = 'fal:seedream-v5-lite-edit';
 
 // ratio value as a number, e.g. "16:9" -> 1.777
 export const ratioValue = (ratio: string): number => {
@@ -346,7 +526,7 @@ export const resolveRatio = (
   return def.ratios.includes('1:1') ? '1:1' : def.ratios[0];
 };
 
-const LONG_EDGE: Record<string, number> = { '0.5K': 512, '1K': 1024, '2K': 2048, '4K': 4096, '8K': 8192 };
+const LONG_EDGE: Record<string, number> = { '0.5K': 512, '1K': 1024, '2K': 2048, '3K': 3072, '4K': 4096, '8K': 8192 };
 
 /** Seedream free-size: WxH (multiple of 8, clamped 512..8192) from ratio + resolution long-edge. */
 export const seedreamSize = (ratio: string, resolution: string): string => {
@@ -382,7 +562,7 @@ const GEMINI_DIMS: Record<string, Record<string, [number, number]>> = {
 };
 
 export const isGeminiFamily = (def: ModelDef): boolean =>
-  def.provider === 'gemini' || /nano-banana|gemini/.test(def.apiModel);
+  /nano-banana|gemini/.test(def.apiModel);
 
 /** Final output size (px) for the current ratio + resolution, for the UI hint.
  *  Resolves "auto" from the reference image. Exact for the Gemini/Nano Banana
@@ -401,10 +581,11 @@ export const finalResolution = (
 
   // Area-budget models (e.g. Grok 2K): output sized by total pixels across the
   // ratio, not by a fixed long edge. 16:9 -> 2816x1584 (confirmed).
-  if (def.pixelBudget) {
+  const pixelBudget = def.resolutionPixelBudgets?.[resolution] ?? def.pixelBudget;
+  if (pixelBudget) {
     return {
-      w: round8(Math.sqrt(def.pixelBudget * r)),
-      h: round8(Math.sqrt(def.pixelBudget / r)),
+      w: round8(Math.sqrt(pixelBudget * r)),
+      h: round8(Math.sqrt(pixelBudget / r)),
       estimate: true,
     };
   }
@@ -415,7 +596,7 @@ export const finalResolution = (
       const dims = GEMINI_DIMS[resolved]?.[resolution];
       if (dims) return { w: dims[0], h: dims[1], estimate: false };
     }
-    const longEdge = LONG_EDGE[resolution];
+    const longEdge = def.resolutionLongEdges?.[resolution] ?? LONG_EDGE[resolution];
     if (!longEdge) return null;
     const dims = r >= 1
       ? { w: round8(longEdge), h: round8(longEdge / r) }
@@ -439,6 +620,8 @@ export interface CostInput {
   webSearch?: boolean;
   imageSearch?: boolean;
   flex?: boolean;
+  imageCount?: number;
+  megapixels?: number;
 }
 
 export interface CostResult {
@@ -459,9 +642,22 @@ export const computeCost = (def: ModelDef, sel: CostInput = {}): CostResult => {
     usd = p.usd;
   } else if (p.kind === 'perResolution') {
     usd = p.usd[res] ?? null;
+  } else if (p.kind === 'flatPlusImages') {
+    const count = sel.imageCount ?? (def.input === 'edit' ? 1 : p.includedImages);
+    usd = p.usd + Math.max(0, count - p.includedImages) * p.extraImageUsd;
+  } else if (p.kind === 'perResolutionPlusImages') {
+    const base = p.usd[res];
+    const count = sel.imageCount ?? (def.input === 'edit' ? 1 : p.includedImages);
+    usd = base == null ? null : base + Math.max(0, count - p.includedImages) * p.extraImageUsd;
   } else if (p.kind === 'qualityRes') {
     const q = sel.quality || def.extras?.quality?.default || 'medium';
     usd = p.usd[q]?.[res] ?? null;
+  } else if (p.kind === 'qualityResEstimate') {
+    const q = sel.quality || def.extras?.quality?.default || 'medium';
+    usd = p.usd[q]?.[res] ?? null;
+    from = true;
+  } else if (p.kind === 'perMegapixel') {
+    if (sel.megapixels != null) usd = p.usd * sel.megapixels;
   } else if (p.kind === 'from') {
     usd = p.usd;
     from = true;
@@ -472,8 +668,8 @@ export const computeCost = (def: ModelDef, sel: CostInput = {}): CostResult => {
   }
 
   if (usd != null) {
-    if (sel.webSearch && def.extras?.webSearch) usd += 0.014;
-    if (sel.imageSearch && def.extras?.imageSearch) usd += 0.014;
+    if (sel.webSearch && def.extras?.webSearch) usd += def.extras.webSearchUsd ?? 0.014;
+    if (sel.imageSearch && def.extras?.imageSearch) usd += def.extras.imageSearchUsd ?? 0.014;
     if (sel.flex && def.flex) usd *= 0.5; // FLEX ≈ 50% cheaper
   }
 
@@ -493,6 +689,9 @@ export const formatUsd = (n: number): string => {
 // Price for the current settings. Exact prices (flat / per-resolution / quality)
 // show as "$X"; estimates (token-billed or "from") get a "~" prefix.
 export const formatCost = (def: ModelDef, sel: CostInput = {}): string => {
+  if (def.pricing.kind === 'perMegapixel' && sel.megapixels == null) {
+    return `$${formatUsd(def.pricing.usd)}/MP`;
+  }
   const { usd, from, tokenBilled } = computeCost(def, sel);
   if (usd == null) return '';
   return `${from || tokenBilled ? '~' : ''}$${formatUsd(usd)}`;

@@ -8,7 +8,7 @@
     <meta name="robots" content="noindex, nofollow" />
 
     <!-- PWA / mobile standalone -->
-    <meta name="theme-color" content="#0a0b0d" />
+    <meta name="theme-color" content="#080b0a" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
@@ -22,8 +22,8 @@
          In local dev this is an empty placeholder and values come from .env (VITE_*). -->
     <script src="/config.js"></script>
   </head>
-  <body class="bg-background text-white antialiased overflow-hidden fixed inset-0">
-    <div id="root" class="h-full w-full overflow-y-auto no-scrollbar"></div>
+  <body class="overflow-x-hidden bg-background text-white antialiased">
+    <div id="root" class="min-h-dvh w-full"></div>
     <script type="module" src="/index.tsx"></script>
   </body>
 </html>

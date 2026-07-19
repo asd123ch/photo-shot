@@ -1,6 +1,6 @@
 import { UploadedFile } from "../types";
 import {
-  API_GEMINI_BASE,
+  API_FAL_BASE,
   API_WAVESPEED_BASE,
   API_OPENROUTER_BASE,
   PROVIDER_AVAILABLE,
@@ -23,7 +23,6 @@ import {
 // absolute poll URLs back onto the proxy.
 const WAVESPEED_BASE = API_WAVESPEED_BASE;
 const WAVESPEED_UPSTREAM = "https://api.wavespeed.ai/api/v3";
-const GEMINI_RETRY_DELAYS_MS = [1000, 2000];
 
 // Every /api request carries the unlock password; the server validates it.
 const authHeaders = (extra: Record<string, string> = {}): Record<string, string> => ({
@@ -32,17 +31,6 @@ const authHeaders = (extra: Record<string, string> = {}): Record<string, string>
 });
 
 // --- small helpers ---------------------------------------------------------
-
-const fileToPart = async (file: File): Promise<{ inlineData: { data: string; mimeType: string } }> =>
-  new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onloadend = () => {
-      const base64 = (reader.result as string).split(',')[1];
-      resolve({ inlineData: { data: base64, mimeType: file.type } });
-    };
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
-  });
 
 const fileToDataUri = async (file: File): Promise<string> =>
   new Promise((resolve, reject) => {
@@ -112,7 +100,6 @@ const abortRejection = (signal?: AbortSignal): Promise<never> =>
     signal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true });
   });
 
-const geminiImageSize = (token: string): string => (token === '0.5K' ? '512' : token);
 const wavespeedResolution = (token: string): string => token.toLowerCase();
 
 const RECRAFT_SIZE: Record<string, string> = {
@@ -214,6 +201,11 @@ interface RunOpts {
   webSearch?: boolean;
   imageSearch?: boolean;
   flex?: boolean;
+  upscaleMode?: 'factor' | 'target';
+  upscaleFactor?: number;
+  targetResolution?: string;
+  creativity?: number;
+  noiseScale?: number;
   signal?: AbortSignal;
 }
 
@@ -227,63 +219,82 @@ export interface GenerateResult {
   provider: Provider;        // for cost aggregation / the spend ledger
 }
 
-const isRetryableGeminiError = (err: any): boolean => {
-  const status = err?.status ?? err?.code;
-  if ([429, 500, 502, 503, 504].includes(Number(status))) return true;
-  const msg = String(err?.message || err).toUpperCase();
-  return ['UNAVAILABLE', 'OVERLOADED', 'HIGH DEMAND', 'RESOURCE_EXHAUSTED', 'SERVICE UNAVAILABLE'].some((m) => msg.includes(m));
-};
+const generateFal = async (
+  def: ModelDef,
+  o: RunOpts,
+  ratio: string,
+  imgDims?: { w: number; h: number },
+): Promise<string> => {
+  if (!PROVIDER_AVAILABLE.fal) throw new Error("No fal.ai API key configured on the server.");
+  const uris = await Promise.all(o.images.map((img) => fileToDataUri(img.file)));
+  const body: Record<string, unknown> = { sync_mode: false };
 
-const generateGemini = async (def: ModelDef, o: RunOpts, ratio: string): Promise<string> => {
-  if (!PROVIDER_AVAILABLE.gemini) throw new Error("No Gemini API key configured on the server.");
-  // Load the Gemini SDK on demand so it stays out of the initial bundle.
-  const { GoogleGenAI, Modality } = await import("@google/genai");
-  // Route the SDK through our same-origin proxy; the server swaps the placeholder
-  // key for the real one. The unlock password rides along as a header.
-  const origin = typeof window !== 'undefined' ? window.location.origin : '';
-  const ai = new GoogleGenAI({
-    apiKey: 'proxy',
-    httpOptions: { baseUrl: `${origin}${API_GEMINI_BASE}`, headers: authHeaders() },
-  });
-  const parts = await Promise.all(o.images.map((img) => fileToPart(img.file)));
-  const contents = { parts: [...parts, { text: o.prompt || "Professional high-quality edit and enhancement." }] };
-  const imageConfig: any = { imageSize: geminiImageSize(o.resolution) };
-  if (ratio) imageConfig.aspectRatio = ratio;
-  const config = { responseModalities: [Modality.IMAGE, Modality.TEXT], imageConfig };
+  if (def.category === 'upscale') {
+    body.image_url = uris[0];
+    if (def.apiModel === 'clarityai/crystal-upscaler') {
+      body.scale_factor = o.upscaleFactor ?? def.upscaleOptions?.scaleFactor?.default ?? 2;
+      body.creativity = o.creativity ?? def.upscaleOptions?.creativity?.default ?? 0;
+    } else {
+      const mode = o.upscaleMode ?? def.upscaleOptions?.mode?.default ?? 'factor';
+      body.upscale_mode = mode;
+      if (mode === 'target') {
+        body.target_resolution = o.targetResolution ?? def.upscaleOptions?.targetResolution?.default ?? '1080p';
+      } else {
+        body.upscale_factor = o.upscaleFactor ?? def.upscaleOptions?.scaleFactor?.default ?? 2;
+      }
+      body.noise_scale = o.noiseScale ?? def.upscaleOptions?.noiseScale?.default ?? 0.1;
+    }
+    if (def.outputFormats) body.output_format = o.outputFormat || def.outputFormats[0];
+  } else {
+    body.prompt = o.prompt || "Professional high-quality edit and enhancement.";
+    body.image_urls = uris;
+    body.num_images = 1;
 
-  const attempts = GEMINI_RETRY_DELAYS_MS.length + 1;
-  let lastError: any;
-  for (let attempt = 1; attempt <= attempts; attempt++) {
-    try {
-      throwIfAborted(o.signal);
-      const response = await Promise.race([
-        ai.models.generateContent({ model: def.apiModel, contents, config }),
-        abortRejection(o.signal),
-      ]);
-      const candidate = (response as any).candidates?.[0];
-      if (!candidate) throw new Error("No candidates returned from Gemini (content may have been blocked).");
-      if (candidate.finishReason && candidate.finishReason !== 'STOP' && candidate.finishReason !== 'MAX_TOKENS') {
-        throw new Error(`Generation stopped by the model (${candidate.finishReason}). Often a safety policy.`);
-      }
-      for (const part of candidate.content?.parts || []) {
-        if (part.inlineData) return `data:${part.inlineData.mimeType || 'image/png'};base64,${part.inlineData.data}`;
-      }
-      throw new Error("The model returned no image data. Try adjusting your prompt.");
-    } catch (error: any) {
-      lastError = error;
-      if (error?.name === 'AbortError') throw error;
-      if (error.message?.includes("Requested entity was not found")) {
-        throw new Error("The Gemini API key configured on the server is invalid or expired.");
-      }
-      if (isRetryableGeminiError(error) && attempt < attempts) {
-        await new Promise((r) => setTimeout(r, GEMINI_RETRY_DELAYS_MS[attempt - 1]));
-        continue;
-      }
-      break;
+    if (def.apiModel.includes('seedream')) {
+      const target = finalResolution(def, ratio, o.resolution, imgDims);
+      body.image_size = o.ratio === 'auto'
+        ? `auto_${o.resolution}`
+        : target ? { width: target.w, height: target.h } : `auto_${o.resolution}`;
+      if (def.outputFormats) body.output_format = o.outputFormat || def.outputFormats[0];
+    } else if (def.apiModel === 'openai/gpt-image-2/edit') {
+      const target = finalResolution(def, ratio, o.resolution, imgDims);
+      // GPT Image requires both custom-size edges to be multiples of 16. Round
+      // down so an area-budget tier never crosses fal.ai's maximum pixel count.
+      body.image_size = target
+        ? { width: Math.floor(target.w / 16) * 16, height: Math.floor(target.h / 16) * 16 }
+        : 'auto';
+      body.quality = o.quality || def.extras?.quality?.default || 'medium';
+      body.output_format = o.outputFormat || def.outputFormats?.[0] || 'png';
+    } else {
+      body.aspect_ratio = o.ratio === 'auto' ? 'auto' : ratio;
+      body.resolution = def.apiModel.includes('grok-imagine')
+        ? o.resolution.toLowerCase()
+        : o.resolution;
+      if (def.outputFormats) body.output_format = o.outputFormat || def.outputFormats[0];
+      if (o.webSearch && def.extras?.webSearch) body.enable_web_search = true;
     }
   }
-  if (isRetryableGeminiError(lastError)) throw new Error("Gemini image API is temporarily overloaded. Please try again in a minute.");
-  throw new Error(lastError?.message || "Unknown Gemini error");
+
+  const response = await fetch(`${API_FAL_BASE}/${def.apiModel}`, {
+    method: 'POST',
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify(body),
+    signal: o.signal,
+    redirect: 'error',
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    let data: any; try { data = JSON.parse(text); } catch { data = { detail: text }; }
+    const detail = Array.isArray(data.detail)
+      ? data.detail.map((d: any) => d.msg || JSON.stringify(d)).join('; ')
+      : data.detail || data.error?.message || data.message;
+    throw new Error(detail || `fal.ai failed: ${response.status}`);
+  }
+  const data = await response.json();
+  const first = data.images?.[0] ?? data.image;
+  const url = typeof first === 'string' ? first : first?.url;
+  if (!url) throw new Error("fal.ai returned no image URL.");
+  return url;
 };
 
 const generateWavespeed = async (def: ModelDef, o: RunOpts, ratio: string): Promise<string> => {
@@ -395,7 +406,7 @@ export const runGenerate = async (o: RunOpts): Promise<GenerateResult> => {
 
   let imageUrl: string;
   let actualCost: number | null = null; // real billed amount, if the provider reports it
-  if (def.provider === 'gemini') imageUrl = await generateGemini(def, oo, ratio);
+  if (def.provider === 'fal') imageUrl = await generateFal(def, oo, ratio, imgDims);
   else if (def.provider === 'wavespeed') imageUrl = await generateWavespeed(def, oo, ratio);
   else {
     const r = await generateOpenrouter(def, oo, ratio);
@@ -409,7 +420,12 @@ export const runGenerate = async (o: RunOpts): Promise<GenerateResult> => {
     webSearch: o.webSearch,
     imageSearch: o.imageSearch,
     flex: o.flex,
+    imageCount: o.images.length,
   };
+  const factor = o.upscaleFactor ?? def.upscaleOptions?.scaleFactor?.default;
+  if (def.pricing.kind === 'perMegapixel' && imgDims && factor && o.upscaleMode !== 'target') {
+    costSel.megapixels = (imgDims.w * imgDims.h * factor ** 2) / 1_000_000;
+  }
   // Prefer the provider's real billed amount; fall back to the price estimate.
   // For flat / per-resolution models the estimate already equals the real price,
   // so only token-billed OpenRouter models actually rely on the actual cost.

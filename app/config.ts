@@ -8,7 +8,7 @@
 
 interface RuntimeConfig {
   providers?: {
-    gemini?: boolean;
+    fal?: boolean;
     wavespeed?: boolean;
     openrouter?: boolean;
   };
@@ -20,14 +20,14 @@ const runtime: RuntimeConfig =
 const isDev = !!(import.meta as any).env?.DEV;
 
 // Same-origin proxy bases. Each provider is reachable under /api/<provider>/…
-export const API_GEMINI_BASE = '/api/gemini';
+export const API_FAL_BASE = '/api/fal';
 export const API_WAVESPEED_BASE = '/api/wavespeed';
 export const API_OPENROUTER_BASE = '/api/openrouter';
 
 // Which providers have a server-side key. In dev there is no proxy, so assume
 // everything is available to keep the UI usable while working on it.
 export const PROVIDER_AVAILABLE = {
-  gemini: isDev || !!runtime.providers?.gemini,
+  fal: isDev || !!runtime.providers?.fal,
   wavespeed: isDev || !!runtime.providers?.wavespeed,
   openrouter: isDev || !!runtime.providers?.openrouter,
 };

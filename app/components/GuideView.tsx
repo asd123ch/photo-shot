@@ -9,10 +9,18 @@ import { Sparkles, BookOpen, Layers } from 'lucide-react';
 // matches what the Editor actually offers.
 
 const inputLabel = (m: ModelDef): string =>
+  m.category === 'upscale' ? 'Upscale photo' :
   m.input === 'text' ? 'Text → image' : m.input === 'edit' ? 'Photo edit' : 'Text or photo';
 
-const resLabel = (m: ModelDef): string =>
-  m.resolutions.length ? m.resolutions.join(' / ') : m.baseLongEdge ? '~2K' : 'Auto';
+const resLabel = (m: ModelDef): string => {
+  if (m.category === 'upscale') {
+    const factor = m.upscaleOptions?.scaleFactor;
+    const targets = m.upscaleOptions?.targetResolution?.values;
+    const factorLabel = factor ? `${factor.min}–${factor.max}×` : '';
+    return targets ? `${factorLabel} / ${targets[0]}–${targets[targets.length - 1]}` : factorLabel || 'Auto';
+  }
+  return m.resolutions.length ? m.resolutions.join(' / ') : m.baseLongEdge ? '~2K' : 'Auto';
+};
 
 const priceLabel = (m: ModelDef): string =>
   formatCost(m, { resolution: m.defaultResolution, quality: m.extras?.quality?.default }) || '—';
@@ -23,6 +31,8 @@ const extrasOf = (m: ModelDef): string[] => {
   if (m.extras?.quality) x.push('Quality');
   if (m.extras?.webSearch) x.push('Web search');
   if (m.extras?.imageSearch) x.push('Image search');
+  if (m.upscaleOptions?.creativity) x.push('Creativity');
+  if (m.upscaleOptions?.noiseScale) x.push('Noise');
   return x;
 };
 
@@ -30,7 +40,8 @@ const imagesLabel = (m: ModelDef): string | null =>
   m.maxImages <= 0 ? null : m.maxImages === 1 ? '1 photo' : `up to ${m.maxImages} photos`;
 
 const CONCEPTS: { term: string; desc: string }[] = [
-  { term: 'Providers', desc: 'Gemini, WaveSpeed and OpenRouter each offer their own set of models. The same model can exist on more than one provider with small differences.' },
+  { term: 'Providers', desc: 'fal.ai, WaveSpeed and OpenRouter each offer their own set of models. The same model can exist on more than one provider with small differences.' },
+  { term: 'Upscale', desc: 'fal.ai upscalers enlarge one source photo without requiring edit instructions.' },
   { term: 'Input', desc: 'Photo edit needs a reference image. Text or photo can do both: edit an image or generate one from a prompt.' },
   { term: 'Resolution', desc: '2K or 4K output where supported. Higher means more detail and a bit more cost; a few models go up to 8K.' },
   { term: 'Ratio', desc: 'The aspect ratio of the result. "Auto" matches your reference photo.' },
@@ -41,7 +52,7 @@ const CONCEPTS: { term: string; desc: string }[] = [
 ];
 
 const PROVIDER_BLURB: Record<Provider, string> = {
-  gemini: "Google's Nano Banana models, called directly. Reliable all-round editing with precise 2K and 4K control.",
+  fal: 'Seedream, Nano Banana, GPT Image and Grok editing, plus dedicated Crystal and SeedVR2 upscalers.',
   wavespeed: 'A large marketplace: Seedream, several Nano Banana variants, GPT Image and Grok. The widest choice, plus 4K and 8K options.',
   openrouter: 'One balance routed to Gemini, GPT Image and Seedream. Adds the FLEX option for cheaper, slower runs.',
 };
@@ -107,7 +118,7 @@ const GuideView: React.FC = () => (
       </h2>
       <p className="text-sm text-gray-400 leading-relaxed">
         Photo-Shot puts three AI providers behind one screen. In the <strong className="text-gray-200">Editor</strong> you
-        edit a photo with a prompt or generate a new image from text. In <strong className="text-gray-200">Metadata</strong> you
+        edit or upscale a photo, or generate a new image from text. In <strong className="text-gray-200">Metadata</strong> you
         copy EXIF, GPS and time from one photo onto another. Pick a provider, then a model: each one supports different
         sizes, ratios and extras. Here is the full overview.
       </p>
@@ -134,6 +145,7 @@ const GuideView: React.FC = () => (
 
     <section className="space-y-2 border-t border-white/5 pt-5 text-xs text-gray-400 leading-relaxed">
       <p><strong className="text-gray-300">Input</strong> shows what a model accepts: "Photo edit" needs a reference image, "Text or photo" does both.</p>
+      <p><strong className="text-gray-300">Upscale</strong> models use one source photo and no prompt. Their shown price is per output megapixel.</p>
       <p><strong className="text-gray-300">Price</strong> is a rough estimate per image at default settings. Picking 4K, a higher Quality or a search option adds to it; FLEX roughly halves it.</p>
     </section>
   </div>

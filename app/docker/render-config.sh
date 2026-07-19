@@ -19,7 +19,7 @@ HISTORY_ROOT="/var/lib/photoshot/api/history"
 mkdir -p "$HISTORY_ROOT/img"
 chown -R nginx:nginx /var/lib/photoshot 2>/dev/null || true
 
-GEMINI_KEY="${GEMINI_API_KEY:-}"
+FAL_KEY_VALUE="${FAL_KEY:-}"
 WAVESPEED_KEY="${WAVESPEED_API_KEY:-}"
 OPENROUTER_KEY="${OPENROUTER_API_KEY:-}"
 APP_PW="${APP_PASSWORD:-}"
@@ -45,7 +45,7 @@ bool() { [ -n "$1" ] && printf 'true' || printf 'false'; }
 cat > "$HTML_CONFIG" <<EOF
 window.__APP_CONFIG__ = {
   "providers": {
-    "gemini": $(bool "$GEMINI_KEY"),
+    "fal": $(bool "$FAL_KEY_VALUE"),
     "wavespeed": $(bool "$WAVESPEED_KEY"),
     "openrouter": $(bool "$OPENROUTER_KEY")
   }
@@ -81,15 +81,15 @@ location @authcheck {
     return 204;
 }
 
-location /api/gemini/ {
+location /api/fal/ {
     if (\$app_auth_ok = 0) { return 401; }
-    proxy_pass https://generativelanguage.googleapis.com/;
-    proxy_set_header Host generativelanguage.googleapis.com;
+    proxy_pass https://fal.run/;
+    proxy_set_header Host fal.run;
     proxy_ssl_server_name on;
-    proxy_set_header x-goog-api-key "$GEMINI_KEY";
+    proxy_set_header Authorization "Key $FAL_KEY_VALUE";
     proxy_set_header X-App-Password "";
-    proxy_read_timeout 300s;
-    proxy_send_timeout 300s;
+    proxy_read_timeout 600s;
+    proxy_send_timeout 600s;
 }
 
 location /api/wavespeed/ {
@@ -153,4 +153,4 @@ location /api/history/img/ {
 }
 EOF
 
-echo "[render-config] wrote browser config + /api proxy (gemini=$(bool "$GEMINI_KEY") wavespeed=$(bool "$WAVESPEED_KEY") openrouter=$(bool "$OPENROUTER_KEY"))"
+echo "[render-config] wrote browser config + /api proxy (fal=$(bool "$FAL_KEY_VALUE") wavespeed=$(bool "$WAVESPEED_KEY") openrouter=$(bool "$OPENROUTER_KEY"))"

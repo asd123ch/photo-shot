@@ -65,7 +65,7 @@ export const clearHistory = async (): Promise<void> => {
 
 // Move a generated image onto the server and return its same-origin path so the
 // index stays small and the image survives on any device. Handles both base64
-// data: URIs (Gemini / OpenRouter / metadata) and remote provider URLs
+// data: URIs (OpenRouter / metadata) and remote provider URLs.
 // (WaveSpeed), which are fetched and re-hosted. Already-local paths and dev mode
 // pass through; any failure falls back to the original URL.
 export const persistImage = async (id: string, url: string): Promise<string> => {
